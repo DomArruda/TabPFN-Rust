@@ -339,6 +339,72 @@ impl TabPFNV3p5 {
         out
     }
 
+    /// Post-output-norm row embeddings `(B, R, icl_emsize)`.
+    ///
+    /// This is the model's internal representation of every row — the closest
+    /// thing TabPFN has to an "encoder" output. Note it is **contextual**: the
+    /// same row gets a different embedding depending on the training set it is
+    /// conditioned on, so it is not a fixed feature extractor.
+    ///
+    /// `x_brc` must contain train rows first, then test rows; `y_train` are the
+    /// train targets. Both train and test embeddings are returned.
+    pub fn encode(
+        &self,
+        x_brc: &Tensor,
+        y_train: &[f32],
+        task: TaskType,
+    ) -> crate::Result<Tensor> {
+        self.run_to_embeddings(x_brc, y_train, task, None, false)
+    }
+
+    /// Cached variant of [`encode`]: embeds test rows against a fitted cache.
+    pub fn encode_cached(
+        &self,
+        cache: &TabPFNV3p5Cache,
+        x_test: &Tensor,
+        y_train: &[f32],
+        task: TaskType,
+    ) -> crate::Result<Tensor> {
+        self.run_to_embeddings(x_test, y_train, task, Some(cache), true)
+    }
+
+    fn run_to_embeddings(
+        &self,
+        x_brc: &Tensor,
+        y_train: &[f32],
+        task: TaskType,
+        cache: Option<&TabPFNV3p5Cache>,
+        x_is_test_only: bool,
+    ) -> crate::Result<Tensor> {
+        let (b, r, _c) = (x_brc.dim(0)?, x_brc.dim(1)?, x_brc.dim(2)?);
+        let n = y_train.len();
+        let (stages_out, _, _, _) = self.stages_0_to_2_impl(x_brc, y_train, task, cache, x_is_test_only)?;
+        let mut x = stages_out.reshape((b, r, self.config.icl_emsize()))?;
+
+        let running_from_cache = cache.is_some_and(|c| !c.is_empty());
+        if running_from_cache {
+            let c = cache.unwrap();
+            for (i, block) in self.icl_blocks.iter().enumerate() {
+                let (out, _) = block.forward(&x, 0, Some((&c.kv[i].key, &c.kv[i].value)))?;
+                x = out;
+            }
+        } else {
+            if n > 0 {
+                let y_prep = self.prepare_y_col(y_train, task);
+                let y_bn = Tensor::from_vec(y_prep, (b, n), &self.device)?;
+                let y_emb = self.y_encoder(task, false).embed(&y_bn)?;
+                let train = (x.narrow(1, 0, n)? + y_emb)?;
+                let tail = x.narrow(1, n, r - n)?;
+                x = Tensor::cat(&[&train, &tail], 1)?;
+            }
+            for block in self.icl_blocks.iter() {
+                let (out, _) = block.forward(&x, n, None)?;
+                x = out;
+            }
+        }
+        RmsNorm::from_weight(self.out_ln_w.clone()).forward(&x)
+    }
+
     pub fn forward(
         &self,
         x_brc: &Tensor,
@@ -357,35 +423,9 @@ impl TabPFNV3p5 {
                 0
             }
         });
-        let (stages_out, _, _, _) = self.stages_0_to_2_impl(x_brc, y_train, task, cache, x_is_test_only)?;
-        let x = stages_out.reshape((b, r, self.config.icl_emsize()))?;
+        let x = self.run_to_embeddings(x_brc, y_train, task, cache, x_is_test_only)?;
 
         let running_from_cache = cache.is_some_and(|c| !c.is_empty());
-        let x = if running_from_cache {
-            let c = cache.unwrap();
-            let mut x = x;
-            for (i, block) in self.icl_blocks.iter().enumerate() {
-                let (out, _) = block.forward(&x, 0, Some((&c.kv[i].key, &c.kv[i].value)))?;
-                x = out;
-            }
-            x
-        } else {
-            let mut x = x;
-            if n > 0 {
-                let y_prep = self.prepare_y_col(y_train, task);
-                let y_bn = Tensor::from_vec(y_prep, (b, n), &self.device)?;
-                let y_emb = self.y_encoder(task, false).embed(&y_bn)?;
-                let train = (x.narrow(1, 0, n)? + y_emb)?;
-                let tail = x.narrow(1, n, r - n)?;
-                x = Tensor::cat(&[&train, &tail], 1)?;
-            }
-            for block in self.icl_blocks.iter() {
-                let (out, _) = block.forward(&x, n, None)?;
-                x = out;
-            }
-            x
-        };
-        let x = RmsNorm::from_weight(self.out_ln_w.clone()).forward(&x)?;
         let (test_emb, train_keys) = if running_from_cache {
             (x.clone(), cache.unwrap().decoder_keys.clone())
         } else {

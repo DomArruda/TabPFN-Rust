@@ -345,38 +345,61 @@ def main() -> int:
 
 
 # --------------------------------------------------------------------------
+def human_list(items: list[str]) -> str:
+    items = list(items)
+    if not items:
+        return "none"
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
 def render_markdown(rep: dict) -> str:
     ds = rep["datasets"]
     out: list[str] = []
+    n_reps = rep["speed"]["full"]["per_dataset"][ds[0]]["means_ms"][RUNTIMES[0]]["n"]
 
-    out.append(f"Measured on 8 datasets x 10 reps; equivalence tolerance `{rep['tol']:g}`. "
-               f"Speed ANOVAs use `log10(ms)`; memory uses `log10(delta + 1)`.\n")
+    out.append(f"{len(ds)} datasets, {n_reps} reps each. Speed ANOVAs use `log10(ms)`; "
+               f"memory uses `log10(delta + 1)`. Equivalence tolerance "
+               f"`{rep['tol']:g}`.\n")
 
-    # ---- computed headline ----
-    out.append("### Headline\n")
+    # ---- plain-English summary ----
+    wins = {
+        mode: [
+            d for d in ds
+            if rep["speed"][mode]["per_dataset"][d]["means_ms"]["rust_native"]["mean"]
+            < rep["speed"][mode]["per_dataset"][d]["means_ms"]["python_pytorch"]["mean"]
+        ]
+        for mode in MODES
+    }
+    out.append("### What the numbers say\n")
+    out.append(
+        f"Rust native was the fastest full-forward runtime on {len(wins['full'])} of "
+        f"{len(ds)} datasets ({human_list(wins['full'])}). PyTorch took the rest. "
+        f"With the cache, Rust native was fastest on {len(wins['cached'])} of {len(ds)} "
+        f"({human_list(wins['cached'])}).\n"
+    )
+    out.append(
+        "The split is consistent rather than noise. Which runtime wins depends on the "
+        "dataset, and that interaction is significant in both modes:\n"
+    )
+    out.append("| mode | interaction F | p | partial eta^2 |")
+    out.append("|---|---:|---:|---:|")
     for mode in MODES:
-        wins = [d for d in ds
-                if rep["speed"][mode]["per_dataset"][d]["means_ms"]["rust_native"]["mean"]
-                < rep["speed"][mode]["per_dataset"][d]["means_ms"]["python_pytorch"]["mean"]]
-        losses = [d for d in ds if d not in wins]
-        tw = rep["speed"][mode]["two_way_anova"]
-        out.append(
-            f"* **{mode}**: Rust-native beats PyTorch on {len(wins)}/{len(ds)} datasets "
-            f"({', '.join(wins) or 'none'}); PyTorch wins on {', '.join(losses) or 'none'}. "
-            f"Interaction F={tw['interaction']['F']:.0f}, p={fmt_p(tw['interaction']['p'])}, "
-            f"partial η²={tw['interaction']['partial_eta_squared']:.2f} — the ranking is "
-            f"**dataset-dependent**, so no single runtime is universally fastest."
-        )
+        e = rep["speed"][mode]["two_way_anova"]["interaction"]
+        out.append(f"| {mode} | {e['F']:.0f} | {fmt_p(e['p'])} | {e['partial_eta_squared']:.2f} |")
     out.append("")
-    out.append("The Rust advantage appears where per-operation overhead dominates (few "
-               "features, short rows) and disappears on wide tables, where the ported "
-               "per-head SDPA loop and Candle's small-matrix kernels lose to PyTorch's "
-               "BLAS-backed batched ops. The cached path pushes the crossover out because "
-               "train-row work is paid once.\n")
+    out.append(
+        "In practice, narrow tables favour the Rust path because it avoids the "
+        "per-operation overhead PyTorch pays on small tensors. Wide tables favour "
+        "PyTorch, which uses tuned BLAS kernels and fused attention while this port "
+        "loops over heads with small matrices. Caching moves the crossover toward "
+        "Rust, since the training rows leave the hot path.\n"
+    )
 
     for mode in MODES:
-        title = "Full forward (train + test, no cache)" if mode == "full" else "Cached (fit once, predict test only)"
-        out.append(f"### Speed — {title}\n")
+        title = "full forward (train and test together)" if mode == "full" else "cached (fit once, predict test rows)"
+        out.append(f"### Speed: {title}\n")
         out.append("| dataset | " + " | ".join(LABEL[r] + " (ms)" for r in RUNTIMES) + " | fastest |")
         out.append("|---|" + "---:|" * (len(RUNTIMES) + 1))
         for d in ds:
@@ -386,15 +409,15 @@ def render_markdown(rep: dict) -> str:
             out.append(f"| {d} | " + " | ".join(cells) + f" | {LABEL[best]} |")
         tw = rep["speed"][mode]["two_way_anova"]
         out.append("")
-        out.append("Two-way ANOVA (runtime x dataset, `log10(ms)`):\n")
-        out.append("| factor | df | F | p | partial η² |")
+        out.append("Two-way ANOVA on `log10(ms)`:\n")
+        out.append("| factor | df | F | p | partial eta^2 |")
         out.append("|---|---:|---:|---:|---:|")
         for f in ["runtime", "dataset", "interaction"]:
             e = tw[f]
             out.append(f"| {f} | {e['df']} | {e['F']:.1f} | {fmt_p(e['p'])} | {e['partial_eta_squared']:.3f} |")
         out.append("")
-        out.append("Tukey–Kramer post-hoc on runtime (pooled):\n")
-        out.append("| pair | Δ log10(ms) | q | p | significant |")
+        out.append("Tukey post-hoc comparisons, runtimes pooled:\n")
+        out.append("| pair | delta log10(ms) | q | p | significant |")
         out.append("|---|---:|---:|---:|---|")
         for t in rep["speed"][mode]["tukey_runtime_log10"]:
             out.append(
@@ -409,7 +432,7 @@ def render_markdown(rep: dict) -> str:
     for r in RUNTIMES:
         f = sum(rep["speed"]["full"]["per_dataset"][d]["means_ms"][r]["mean"] for d in ds) / len(ds)
         c = sum(rep["speed"]["cached"]["per_dataset"][d]["means_ms"][r]["mean"] for d in ds) / len(ds)
-        out.append(f"| {LABEL[r]} | {f:.1f} | {c:.1f} | {f / c:.1f}× |")
+        out.append(f"| {LABEL[r]} | {f:.1f} | {c:.1f} | {f / c:.1f}x |")
     out.append("")
 
     out.append("### Numerical parity vs PyTorch (max |logit diff|)\n")
@@ -425,13 +448,14 @@ def render_markdown(rep: dict) -> str:
                 cells.append(f"{e['max_abs']:.2e}")
             out.append(f"| {d} | {mode} | " + " | ".join(cells) + " |")
     out.append("")
-    out.append(f"All {len(RUNTIMES) - 1} non-baseline runtimes pass the one-sided equivalence "
-               f"test (mean|diff| < {rep['tol']:g}, p < 0.05) on every dataset/mode; "
-               f"worst observed max |diff| = {worst:.2e}.\n")
+    out.append(f"PyO3, native Rust and WASM all pass the one-sided equivalence test on "
+               f"every dataset and mode (mean|diff| below {rep['tol']:g}, p < 0.05). "
+               f"Worst observed max |diff| was {worst:.2e}.\n")
 
     out.append("### Accuracy / agreement\n")
-    out.append("Randomly initialised weights, so predictive accuracy is chance level — this "
-               "table verifies that all runtimes make the *same* predictions.\n")
+    out.append("The fixture uses randomly initialised weights, so predictive accuracy is "
+               "chance level. What this table checks is that all four runtimes make the "
+               "same predictions.\n")
     out.append("| dataset | task | " + " | ".join(LABEL[r] + " acc" for r in RUNTIMES) + " | argmax agreement |")
     out.append("|---|---|" + "---:|" * (len(RUNTIMES) + 1))
     for d in ds:
@@ -447,9 +471,9 @@ def render_markdown(rep: dict) -> str:
     out.append("")
 
     out.append("### Compute / memory footprint\n")
-    out.append("Peak RSS is sampled externally per subprocess. *Baseline* = interpreter + "
-               "framework + model + data, no inference. *Delta* isolates the inference transients.\n")
-    out.append("| dataset | mode | " + " | ".join(LABEL[r] + " base / peak / Δ MB" for r in RUNTIMES) + " |")
+    out.append("Peak RSS is sampled from outside each process. *Baseline* is interpreter, "
+               "framework, model and data with no inference. *Delta* is the inference transient.\n")
+    out.append("| dataset | mode | " + " | ".join(LABEL[r] + " base / peak / delta MB" for r in RUNTIMES) + " |")
     out.append("|---|---|" + "---:|" * len(RUNTIMES))
     for d in ds:
         for mode in MODES:
@@ -458,9 +482,9 @@ def render_markdown(rep: dict) -> str:
             out.append(f"| {d} | {mode} | " + " | ".join(cells) + " |")
     out.append("")
     tb = rep["memory"]["full"]["two_way_anova_log10_delta"]
-    out.append("Randomized-block two-way ANOVA on inference delta (full forward; "
-               "dataset is the block, runtime the treatment):\n")
-    out.append("| factor | df | F | p | partial η² |")
+    out.append("Randomized-block ANOVA on inference memory. Dataset is the block, "
+               "runtime is the treatment:\n")
+    out.append("| factor | df | F | p | partial eta^2 |")
     out.append("|---|---:|---:|---:|---:|")
     for f in ["runtime", "dataset"]:
         e = tb[f]
@@ -468,9 +492,8 @@ def render_markdown(rep: dict) -> str:
     out.append("")
 
     if rep.get("ffi_overhead_us_mean") is not None:
-        out.append(f"Python→Rust FFI call overhead (no-op `ping`, 20k calls): "
-                   f"**{rep['ffi_overhead_us_mean']:.2f} µs/call** — negligible against "
-                   f"multi-millisecond inference.\n")
+        out.append(f"Python to Rust call overhead, measured with a no-op call 20,000 times: "
+                   f"**{rep['ffi_overhead_us_mean']:.2f} us/call**. Negligible next to inference.\n")
     return "\n".join(out)
 
 

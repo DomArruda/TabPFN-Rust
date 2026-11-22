@@ -95,6 +95,43 @@ impl PyTabPfn {
         Ok(to_bytes(py, &flat))
     }
 
+    /// Post-output-norm row embeddings, flat f32 bytes of shape
+    /// `(n_train + n_test, icl_emsize)`. Contextual representation, not a
+    /// fixed feature extractor.
+    fn encode<'py>(
+        &self,
+        py: Python<'py>,
+        x_all: &Bound<'_, PyBytes>,
+        n_train: usize,
+        n_test: usize,
+        n_cols: usize,
+        y_train: &Bound<'_, PyBytes>,
+        task_type: &str,
+    ) -> PyResult<Py<PyBytes>> {
+        let x = to_f32(x_all.as_bytes())?;
+        let y = to_f32(y_train.as_bytes())?;
+        let tt = task(task_type)?;
+        if x.len() != (n_train + n_test) * n_cols {
+            return Err(PyValueError::new_err("x_all size mismatch"));
+        }
+        let xt = Tensor::from_vec(x, (1, n_train + n_test, n_cols), &self.model.device)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let emb = self
+            .model
+            .encode(&xt, &y, tt)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (b, r, e) = (emb.dim(0).unwrap(), emb.dim(1).unwrap(), emb.dim(2).unwrap());
+        let _ = b;
+        let flat: Vec<f32> = emb
+            .reshape((r, e))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .flatten_all()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .to_vec1::<f32>()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(to_bytes(py, &flat))
+    }
+
     /// fit(x_train, n_rows, n_cols, y_train, task) — build the KV cache once.
     fn fit(
         &mut self,

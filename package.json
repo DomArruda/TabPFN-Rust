@@ -15,6 +15,7 @@
     "bench": "python scripts/run_benchmarks.py --reps 10",
     "bench:quick": "python scripts/run_benchmarks.py --reps 5 --quick",
     "analyze": "python scripts/analyze.py --write-readme",
+    "embeddings": "python scripts/embed_projection.py --dataset clf_digits_w",
     "bench:all": "npm run fixtures && npm run bench && npm run analyze",
     "smoke": "bun run scripts/harness_wasm.ts --dataset clf_iris_s --reps 3 --mode cached --out scripts/results/tmp/smoke.json"
   },

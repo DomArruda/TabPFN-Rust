@@ -1,167 +1,195 @@
 # TabPFN-Rust
 
-A port of TabPFN v3.5's inference architecture to Rust (Candle), with Python
-and WebAssembly bindings.
+Inference-only port of TabPFN v3.5 to Rust, using Candle. Ships as a Python
+extension and as a WebAssembly module.
 
-The neural architecture is a faithful inference-only port of
-`tabpfn/architectures/tabpfn_v3_5.py`: same stages, same tensor shapes, same
-config defaults, and the exact PyTorch `state_dict` key paths (no remapping).
-Cross-runtime outputs agree to ~1e-7 against PyTorch on the same weights.
+The network is the same as `tabpfn/architectures/tabpfn_v3_5.py`: same stages,
+shapes and config defaults, and the original PyTorch `state_dict` key names, so
+checkpoints load without a rename map. Outputs match PyTorch to about 1e-6 on
+the same weights.
+
+No training, no autograd, no quantisation. CPU only.
 
 ## Layout
 
 ```
-crates/tabpfn-core/   pure Rust + Candle model, preprocessing, KV cache
-crates/tabpfn-wasm/   wasm-bindgen bindings (JS/TS API)
+crates/tabpfn-core/   Rust + Candle model, preprocessing, KV cache
+crates/tabpfn-wasm/   wasm-bindgen bindings (JS/TS)
 crates/tabpfn-py/     PyO3 bindings (CPython extension)
-scripts/              dataset generation, harnesses, stats, fixtures
-main.ts               feature demo (Bun)
+docs/RUST.md          using the core directly from Rust
+scripts/              fixtures, dataset generation, benchmarks, stats
+main.ts               feature demo
 smoke.test.ts         Bun tests
 ```
 
-## Quick start
+## Build
 
 ```bash
-# Rust core: parity tests against the PyTorch golden fixtures
+# Rust core tests
 cargo test -p tabpfn-core
 
-# WASM (SIMD128) + JS glue
-npm run build:wasm          # cargo build --target wasm32-unknown-unknown --release + wasm-bindgen
+# WASM + JS glue (outputs to pkg/, git-ignored)
+npm run build:wasm
 
-# Bun tests + demo
-bun test
-bun run main.ts
-
-# Python extension (builds scripts/tabpfn_rs.pyd)
+# Python extension (outputs scripts/tabpfn_rs.pyd / .so)
 cargo build -p tabpfn-py --release
-copy target/release/tabpfn_rs.dll scripts/tabpfn_rs.pyd   # Windows
+copy target\release\tabpfn_rs.dll scripts\tabpfn_rs.pyd   # Windows
 # cp target/release/libtabpfn_rs.so scripts/tabpfn_rs.so  # Linux/macOS
 ```
 
-The `pkg/` directory and the `.pyd`/`.so` are build artefacts and are
-git-ignored. The `scripts/fixtures/model.safetensors` test fixture (a tiny
-2-layer model with deterministic weights) is committed so the Rust and WASM
-tests run without a Python environment.
+`scripts/fixtures/model.safetensors` is a small 2-layer model with fixed
+weights. It is committed so the Rust and WASM tests run without PyTorch.
 
-## KV caching: what `fit()` stores, and how to use it
+## Using the bindings
 
-TabPFN's ICL stage lets test rows attend **only to training rows** — never to
-each other. Test predictions are therefore conditionally independent given the
-training set, so everything that depends solely on the training data can be
-computed once and reused across `predict()` calls. That is exactly what
-`fit()` does.
+Both bindings take and return flat little-endian `f32` buffers. Row-major,
+shape `(rows, cols)`. Call `fit()` once per training set, then `predict()` as
+often as you like.
 
-| cached field | shape | why it is reusable |
-|---|---|---|
-| `inducing_hidden` (per dist. block) | `(B·C, n_ind, E)` | inducing points attend to train rows only |
-| `kv[layer]` (K and V) | `(B, N, n_kv_heads_test, head_dim)` per layer | ICL keys/values are train-only, already `k_norm`'d and sliced to the test-only heads |
-| `decoder_keys` (multiclass) | `(B, N, H_dec, D_dec)` | many-class decoder keys come from train rows only |
-| `scaler_mean` / `scaler_std` | `(C,)` | fitted on train rows |
-| `ecdf_context` | `(3, B, C, K)` | ECDF bucket edges built from train rows |
-
-`predict(X_test)` then runs only the test-row path: cell embedding, the second
-distribution-attention pass (test → cached inducing hidden), column
-aggregation, ICL queries against the cached K/V, and the decoder queries.
-Cost is **O(M)** in test rows and independent of `N`.
-
-### Same operation on each surface
-
-**Rust**
-
-```rust
-let cache = model.fit(&x_train, &y_train, TaskType::Multiclass)?;         // once
-let out   = model.predict_with_y(&cache, &x_test, &y_train, TaskType::Multiclass)?; // many
-```
-
-**Python (PyO3 binding)**
+### Python
 
 ```python
+import numpy as np
 from tabpfn_rs import TabPfn
-m = TabPfn(weights, config_json)
-m.fit(x_train.tobytes(), n_train, n_cols, y_train.tobytes(), "multiclass")
-out = m.predict(x_test.tobytes(), n_test, n_cols, "multiclass")
+
+# weights: raw safetensors bytes
+# config_json: the architecture config as JSON (from the checkpoint metadata)
+m = TabPfn(open("model.safetensors", "rb").read(), config_json)
+
+x_train = np.ascontiguousarray(x_train, dtype=np.float32)
+x_test = np.ascontiguousarray(x_test, dtype=np.float32)
+y_train = np.ascontiguousarray(y_train, dtype=np.float32)
+
+# classification
+m.fit(x_train.tobytes(), len(x_train), x_train.shape[1], y_train.tobytes(), "multiclass")
+logits = np.frombuffer(
+    m.predict(x_test.tobytes(), len(x_test), x_test.shape[1], "multiclass"),
+    dtype="<f4",
+).reshape(len(x_test), -1)
+labels = logits.argmax(axis=1)
+
+# regression: same calls with "regression"; output is (n_test, num_buckets)
 ```
 
-**WASM / TypeScript**
+One `TabPfn` instance holds one fitted training set. Build a second instance
+for a second dataset.
+
+### JavaScript / TypeScript
 
 ```ts
+import init, { TabPfnWasm } from "./pkg/tabpfn_wasm.js";
+
+await init();
+
+// weights: raw safetensors bytes; configJson: architecture config as JSON
+const weights = new Uint8Array(await (await fetch("model.safetensors")).arrayBuffer());
 const m = new TabPfnWasm(weights, configJson);
+
+const xTrain = new Float32Array(flatTrainingRows);
+const xTest = new Float32Array(flatTestRows);
+const yTrain = new Float32Array(trainLabels);
+
 m.fit(xTrain, nTrain, nCols, yTrain, "multiclass");
-const out = m.predict(xTest, nTest, nCols, "multiclass");
+const logits = m.predict(xTest, nTest, nCols, "multiclass");
+// logits: Float32Array, row-major (nTest * numOutputs)
 ```
 
-**PyTorch reference (upstream TabPFN)** — the same two-step pattern already
-exists there, either high-level or via the explicit cache:
+The module is built with `-C target-feature=+simd128`. Bun and browsers both
+work; with the `web` target, load it from a page or worker, not from Node's
+`fetch`.
+
+### Output shapes
+
+| task | output | how to read it |
+|---|---|---|
+| `multiclass` | `n_test x max_num_classes` logits | `argmax` per row |
+| `regression` | `n_test x num_buckets` bar logits | softmax, then weighted mean over bucket centres |
+
+Bucket borders are stored in the checkpoint as `heads.regression_borders`
+(`num_buckets + 1` values). Read them from the safetensors file to build the
+centres. The bindings do not expose them yet.
+
+### Row embeddings
+
+`encode()` returns the representation the decoder consumes, `(rows,
+icl_emsize)`. It is contextual, so the same row produces a different vector for
+a different training set. Train rows include their target embedding, so they
+cluster by label; use test rows for a label-free view.
 
 ```python
-clf = TabPFNClassifier(fit_mode="fit_with_cache")   # high level
-clf.fit(X, y)
-probs = clf.predict(X_test)                         # reuses the cache
-
-# low level (this is what the benchmark harness does)
-_, cache = model.forward(x_all, y, "multiclass", return_kv_cache=True)
-logits = model.forward(x_test, y, "multiclass", kv_cache=cache, x_is_test_only=True)
+emb = np.frombuffer(
+    m.encode(x_all.tobytes(), n_train, n_test, n_cols, y_train.tobytes(), "multiclass"),
+    dtype="<f4",
+).reshape(n_train + n_test, -1)
 ```
 
-### What it buys
-
-Caching removes the training-row work from the hot path, so the win scales with
-`N` and shrinks as the per-row cost grows with feature count. On iris-scale
-data a cached `predict` is single-digit milliseconds; on the widest table it is
-tens of milliseconds. The exact per-dataset numbers, and a
-*Cached vs full (mean over datasets)* summary, are generated in the benchmark
-section below by `python scripts/analyze.py --write-readme`.
-
-### Cache size
-
-For the released config (`nlayers=24`, `head_dim=64`, `n_kv_heads_test=1`,
-`6×64` decoder, `128` inducing points, `E=128`, `K=8192`), per estimator:
-
-```
-ICL K/V       12,288 · N  bytes     (12 MB per 1,000 train rows)
-decoder keys   1,536 · N  bytes     (multiclass only)
-inducing     196,608 · C  bytes     (20 MB at C = 100)
-ECDF context  98,304 · C  bytes     (10 MB at C = 100)
+```ts
+const emb = m.encode(xAll, nTrain, nTest, nCols, yTrain, "multiclass");
 ```
 
-The benchmark's tiny config (`E=32`, 2 layers, 16 inducing points, `K=8`) is
-correspondingly small (~0.5 MB for the widest dataset).
+`python scripts/embed_projection.py --dataset clf_digits_w` projects these with
+PCA, t-SNE and UMAP into `scripts/results/embeddings_*.png`. With the committed
+random-weight fixture the test-row silhouette is 0.00, which is expected: the
+pipeline works, the weights are not trained.
 
-### Guard rails and caveats
+### Core Rust
 
-* A cache is valid only for the exact training set it was built from. The Rust
-  `predict_with_y` now rejects a mismatched column count, batch size, train-row
-  count, layer count, or a regression cache used for multiclass — with an
-  explicit message instead of silently returning garbage.
-* Multiclass caches carry `decoder_keys`; regression caches do not (and are
-  smaller).
-* Cached `predict` still costs O(M) per test row; chunk very large test sets.
+See [docs/RUST.md](docs/RUST.md) for loading weights, `forward`, `fit` /
+`predict_with_y`, `encode`, and the runnable `basic_usage` example.
 
-## Benchmark: 4 runtimes, identical data
+### Why caching helps
 
-We compare the same inference workload across:
+Test rows attend only to training rows, never to each other. The training-side
+work therefore only has to run once. `fit()` stores the inducing hidden states,
+the per-layer ICL keys and values, the decoder keys, the scaler statistics and
+the ECDF context. `predict()` then processes just the new rows.
+
+| cached item | shape | why it can be reused |
+|---|---|---|
+| inducing hidden states | `(B*C, n_ind, E)` per block | built from train rows |
+| ICL keys and values | `(B, N, n_kv_heads_test, head_dim)` per layer | train rows only, already normalised |
+| decoder keys | `(B, N, H_dec, D_dec)` | multiclass only, built from train rows |
+| scaler mean/std | `(C,)` | fitted on train rows |
+| ECDF context | `(3, B, C, K)` | bucket edges from train rows |
+
+Cache size for the released config, per estimator:
+
+```
+ICL K/V       12,288 * N bytes     12 MB per 1,000 train rows
+decoder keys   1,536 * N bytes     multiclass only
+inducing     196,608 * C bytes     20 MB at 100 columns
+ECDF context  98,304 * C bytes     10 MB at 100 columns
+```
+
+If you only call `predict()` once, skip `fit()` and use the single-pass
+`forward` path instead.
+
+## Nerd stuff
+
+Benchmarks and hypothesis tests. Everything here is reproducible from the
+committed fixtures.
+
+### What is compared
 
 | runtime | what it is |
 |---|---|
-| `python_pytorch` | original Python / PyTorch TabPFN v3.5, CPU only (`torch 2.9.1+cpu`) |
-| `python_bindings` | the Rust core called through the PyO3 extension |
+| `python_pytorch` | upstream Python / PyTorch TabPFN v3.5, CPU only (`torch 2.9.1+cpu`) |
+| `python_bindings` | the Rust core through the PyO3 extension |
 | `rust_native` | Rust / Candle, native release binary |
-| `wasm_bun` | Rust / Candle compiled to WASM SIMD128, run under Bun |
+| `wasm_bun` | Rust / Candle as WASM SIMD128, run under Bun |
 
-Two code paths are timed on every dataset:
+Two code paths per dataset:
 
-* **full** — one single-pass forward over `train + test` rows (no cache):
-  stages 0–2 preprocessing, distribution embedder, column aggregator, ICL
-  transformer, decoder.
-* **cached** — `fit()` once (builds inducing-hidden states, per-layer ICL K/V,
-  and decoder keys), then time `predict()` on test rows only.
+* **full**: one forward over train and test rows together.
+* **cached**: `fit()` once, then time `predict()` on test rows.
 
-A third `baseline` mode loads the model and data but runs no inference; its
-peak RSS is subtracted from the other two to isolate inference memory.
+A third **baseline** run loads the model and data without inference, so its
+peak RSS can be subtracted to isolate inference memory.
 
-Datasets are 8 real/synthetic sets at four scale levels, generated by
-`scripts/gen_datasets.py` and shared byte-for-byte via hex-encoded f32
-(`scripts/datasets.json`) so NaN/±Inf survive in all three languages:
+### Datasets
+
+Eight sets at four sizes, generated by `scripts/gen_datasets.py` and passed to
+every runtime as the same hex-encoded f32 bytes, so NaN and infinities survive.
 
 | dataset | task | train | test | cols |
 |---|---|---:|---:|---:|
@@ -169,57 +197,56 @@ Datasets are 8 real/synthetic sets at four scale levels, generated by
 | clf_wine_m | multiclass | 100 | 25 | 13 |
 | clf_breast_l | multiclass | 300 | 50 | 30 |
 | clf_digits_w | multiclass | 200 | 30 | 64 |
-| clf_iris_nan | multiclass | 40 | 12 | 4 (NaN/±Inf/out-of-range) |
+| clf_iris_nan | multiclass | 40 | 12 | 4 (NaN, inf, out-of-range) |
 | reg_diabetes_s | regression | 40 | 10 | 10 |
 | reg_synth_m | regression | 120 | 25 | 20 |
 | reg_synth_w | regression | 250 | 40 | 50 |
 
-Peak RSS is sampled externally with `psutil` for every subprocess, so all four
-runtimes are measured identically rather than self-reporting.
+Peak RSS is sampled from outside each process with `psutil`, so all four
+runtimes are measured the same way.
 
-> **Accuracy caveat.** The committed fixture uses randomly initialised weights
-> (a 2-layer model), so *predictive* accuracy is chance-level and identical
-> across runtimes by construction. "Accuracy" below therefore means
-> **cross-runtime numerical equivalence** (parity within `1e-4`) plus argmax
-> agreement — the property that actually matters for a port. Real predictive
-> accuracy requires the licensed upstream checkpoint.
+The fixture weights are random (2-layer model). Predictive accuracy is
+therefore chance level and identical across runtimes. The accuracy table below
+checks that every runtime makes the same predictions, which is what matters for
+a port. Real accuracy needs the licensed checkpoint.
 
-## Replication
+### Reproduce
 
 ```bash
-# 1. fixtures + datasets
-pip install tabpfn safetensors       # PyTorch reference
-python scripts/export_weights.py     # writes scripts/fixtures/{model,golden}.safetensors
-python scripts/gen_datasets.py       # writes scripts/datasets.json
+pip install tabpfn safetensors
+python scripts/export_weights.py
+python scripts/gen_datasets.py
 
-# 2. build every runtime
 cargo build --release -p tabpfn-core --example harness_datasets
 npm run build:wasm
-cargo build -p tabpfn-py --release && copy target\release\tabpfn_rs.dll scripts\tabpfn_rs.pyd
+cargo build -p tabpfn-py --release
+copy target\release\tabpfn_rs.dll scripts\tabpfn_rs.pyd
 
-# 3. run the matrix (4 runtimes x 8 datasets x 3 modes, 10 reps each)
 python scripts/run_benchmarks.py --reps 10
-
-# 4. statistics -> scripts/results/stats.json, and refresh this README section
-python scripts/analyze.py --write-readme
+python scripts/analyze.py --write-readme    # rewrites the block below
 ```
 
-Statistics: one-way ANOVA per dataset (speed and memory), a pooled two-way
-ANOVA with replication (factor A = runtime, factor B = dataset, response =
-`log10(ms)`), Tukey–Kramer post-hoc tests, and a one-sided equivalence test
-for parity (mean absolute logit difference `< 1e-4`).
+Tests: one-way ANOVA per dataset on speed and memory, a pooled two-way ANOVA
+(runtime x dataset, `log10(ms)`), Tukey post-hoc comparisons, and a one-sided
+equivalence test on parity (mean absolute logit difference below 1e-4).
 
 <!-- BENCH:START -->
-Measured on 8 datasets x 10 reps; equivalence tolerance `0.0001`. Speed ANOVAs use `log10(ms)`; memory uses `log10(delta + 1)`.
+8 datasets, 10 reps each. Speed ANOVAs use `log10(ms)`; memory uses `log10(delta + 1)`. Equivalence tolerance `0.0001`.
 
-### Headline
+### What the numbers say
 
-* **full**: Rust-native beats PyTorch on 3/8 datasets (clf_iris_nan, clf_iris_s, reg_diabetes_s); PyTorch wins on clf_breast_l, clf_digits_w, clf_wine_m, reg_synth_m, reg_synth_w. Interaction F=190, p=3.59e-155, partial η²=0.93 — the ranking is **dataset-dependent**, so no single runtime is universally fastest.
-* **cached**: Rust-native beats PyTorch on 5/8 datasets (clf_iris_nan, clf_iris_s, clf_wine_m, reg_diabetes_s, reg_synth_m); PyTorch wins on clf_breast_l, clf_digits_w, reg_synth_w. Interaction F=478, p=4.07e-210, partial η²=0.97 — the ranking is **dataset-dependent**, so no single runtime is universally fastest.
+Rust native was the fastest full-forward runtime on 3 of 8 datasets (clf_iris_nan, clf_iris_s and reg_diabetes_s). PyTorch took the rest. With the cache, Rust native was fastest on 5 of 8 (clf_iris_nan, clf_iris_s, clf_wine_m, reg_diabetes_s and reg_synth_m).
 
-The Rust advantage appears where per-operation overhead dominates (few features, short rows) and disappears on wide tables, where the ported per-head SDPA loop and Candle's small-matrix kernels lose to PyTorch's BLAS-backed batched ops. The cached path pushes the crossover out because train-row work is paid once.
+The split is consistent rather than noise. Which runtime wins depends on the dataset, and that interaction is significant in both modes:
 
-### Speed — Full forward (train + test, no cache)
+| mode | interaction F | p | partial eta^2 |
+|---|---:|---:|---:|
+| full | 190 | 3.59e-155 | 0.93 |
+| cached | 478 | 4.07e-210 | 0.97 |
+
+In practice, narrow tables favour the Rust path because it avoids the per-operation overhead PyTorch pays on small tensors. Wide tables favour PyTorch, which uses tuned BLAS kernels and fused attention while this port loops over heads with small matrices. Caching moves the crossover toward Rust, since the training rows leave the hot path.
+
+### Speed: full forward (train and test together)
 
 | dataset | Python (PyTorch) (ms) | Python (PyO3) (ms) | Rust native (ms) | WASM (Bun) (ms) | fastest |
 |---|---:|---:|---:|---:|---:|
@@ -232,17 +259,17 @@ The Rust advantage appears where per-operation overhead dominates (few features,
 | reg_synth_m | 27.59 ± 1.70 | 55.10 ± 4.73 | 54.35 ± 3.92 | 71.69 ± 0.77 | Python (PyTorch) |
 | reg_synth_w | 69.02 ± 2.38 | 289.28 ± 44.79 | 292.69 ± 25.18 | 501.32 ± 199.19 | Python (PyTorch) |
 
-Two-way ANOVA (runtime x dataset, `log10(ms)`):
+Two-way ANOVA on `log10(ms)`:
 
-| factor | df | F | p | partial η² |
+| factor | df | F | p | partial eta^2 |
 |---|---:|---:|---:|---:|
 | runtime | 3 | 519.4 | 8.05e-116 | 0.844 |
 | dataset | 7 | 5434.2 | <1e-300 | 0.992 |
 | interaction | 21 | 190.0 | 3.59e-155 | 0.933 |
 
-Tukey–Kramer post-hoc on runtime (pooled):
+Tukey post-hoc comparisons, runtimes pooled:
 
-| pair | Δ log10(ms) | q | p | significant |
+| pair | delta log10(ms) | q | p | significant |
 |---|---:|---:|---:|---|
 | Python (PyTorch) vs Python (PyO3) | -0.184 | 33.31 | <1e-300 | yes |
 | Python (PyTorch) vs Rust native | -0.211 | 38.18 | <1e-300 | yes |
@@ -251,7 +278,7 @@ Tukey–Kramer post-hoc on runtime (pooled):
 | Python (PyO3) vs WASM (Bun) | -0.116 | 20.95 | <1e-300 | yes |
 | Rust native vs WASM (Bun) | -0.089 | 16.07 | <1e-300 | yes |
 
-### Speed — Cached (fit once, predict test only)
+### Speed: cached (fit once, predict test rows)
 
 | dataset | Python (PyTorch) (ms) | Python (PyO3) (ms) | Rust native (ms) | WASM (Bun) (ms) | fastest |
 |---|---:|---:|---:|---:|---:|
@@ -264,17 +291,17 @@ Tukey–Kramer post-hoc on runtime (pooled):
 | reg_synth_m | 12.47 ± 0.62 | 10.55 ± 0.24 | 10.51 ± 0.36 | 11.05 ± 0.25 | Rust native |
 | reg_synth_w | 16.40 ± 0.60 | 34.68 ± 0.80 | 38.00 ± 1.34 | 45.26 ± 3.90 | Python (PyTorch) |
 
-Two-way ANOVA (runtime x dataset, `log10(ms)`):
+Two-way ANOVA on `log10(ms)`:
 
-| factor | df | F | p | partial η² |
+| factor | df | F | p | partial eta^2 |
 |---|---:|---:|---:|---:|
 | runtime | 3 | 876.6 | 1.98e-144 | 0.901 |
 | dataset | 7 | 9099.1 | <1e-300 | 0.995 |
 | interaction | 21 | 478.1 | 4.07e-210 | 0.972 |
 
-Tukey–Kramer post-hoc on runtime (pooled):
+Tukey post-hoc comparisons, runtimes pooled:
 
-| pair | Δ log10(ms) | q | p | significant |
+| pair | delta log10(ms) | q | p | significant |
 |---|---:|---:|---:|---|
 | Python (PyTorch) vs Python (PyO3) | +0.221 | 62.26 | <1e-300 | yes |
 | Python (PyTorch) vs Rust native | +0.197 | 55.51 | <1e-300 | yes |
@@ -287,10 +314,10 @@ Tukey–Kramer post-hoc on runtime (pooled):
 
 | runtime | full (ms) | cached (ms) | speedup |
 |---|---:|---:|---:|
-| Python (PyTorch) | 37.4 | 13.0 | 2.9× |
-| Python (PyO3) | 115.8 | 14.4 | 8.0× |
-| Rust native | 115.8 | 15.4 | 7.5× |
-| WASM (Bun) | 179.7 | 18.6 | 9.7× |
+| Python (PyTorch) | 37.4 | 13.0 | 2.9x |
+| Python (PyO3) | 115.8 | 14.4 | 8.0x |
+| Rust native | 115.8 | 15.4 | 7.5x |
+| WASM (Bun) | 179.7 | 18.6 | 9.7x |
 
 ### Numerical parity vs PyTorch (max |logit diff|)
 
@@ -313,11 +340,11 @@ Tukey–Kramer post-hoc on runtime (pooled):
 | reg_synth_w | full | 4.77e-07 | 4.77e-07 | 1.79e-07 |
 | reg_synth_w | cached | 4.77e-07 | 4.77e-07 | 1.79e-07 |
 
-All 3 non-baseline runtimes pass the one-sided equivalence test (mean|diff| < 0.0001, p < 0.05) on every dataset/mode; worst observed max |diff| = 1.43e-06.
+PyO3, native Rust and WASM all pass the one-sided equivalence test on every dataset and mode (mean|diff| below 0.0001, p < 0.05). Worst observed max |diff| was 1.43e-06.
 
 ### Accuracy / agreement
 
-Randomly initialised weights, so predictive accuracy is chance level — this table verifies that all runtimes make the *same* predictions.
+The fixture uses randomly initialised weights, so predictive accuracy is chance level. What this table checks is that all four runtimes make the same predictions.
 
 | dataset | task | Python (PyTorch) acc | Python (PyO3) acc | Rust native acc | WASM (Bun) acc | argmax agreement |
 |---|---|---:|---:|---:|---:|---:|
@@ -332,9 +359,9 @@ Randomly initialised weights, so predictive accuracy is chance level — this ta
 
 ### Compute / memory footprint
 
-Peak RSS is sampled externally per subprocess. *Baseline* = interpreter + framework + model + data, no inference. *Delta* isolates the inference transients.
+Peak RSS is sampled from outside each process. *Baseline* is interpreter, framework, model and data with no inference. *Delta* is the inference transient.
 
-| dataset | mode | Python (PyTorch) base / peak / Δ MB | Python (PyO3) base / peak / Δ MB | Rust native base / peak / Δ MB | WASM (Bun) base / peak / Δ MB |
+| dataset | mode | Python (PyTorch) base / peak / delta MB | Python (PyO3) base / peak / delta MB | Rust native base / peak / delta MB | WASM (Bun) base / peak / delta MB |
 |---|---|---:|---:|---:|---:|
 | clf_breast_l | full | 423 / 460 / 36.4 | 35 / 68 / 33.0 | 7 / 40 / 32.6 | 83 / 239 / 156.2 |
 | clf_breast_l | cached | 423 / 459 / 35.3 | 35 / 59 / 23.7 | 7 / 31 / 23.1 | 83 / 189 / 106.3 |
@@ -353,24 +380,25 @@ Peak RSS is sampled externally per subprocess. *Baseline* = interpreter + framew
 | reg_synth_w | full | 422 / 471 / 49.0 | 37 / 83 / 45.6 | 8 / 53 / 45.8 | 87 / 220 / 133.1 |
 | reg_synth_w | cached | 422 / 470 / 48.0 | 37 / 75 / 37.7 | 8 / 44 / 37.0 | 87 / 193 / 106.1 |
 
-Randomized-block two-way ANOVA on inference delta (full forward; dataset is the block, runtime the treatment):
+Randomized-block ANOVA on inference memory. Dataset is the block, runtime is the treatment:
 
-| factor | df | F | p | partial η² |
+| factor | df | F | p | partial eta^2 |
 |---|---:|---:|---:|---:|
 | runtime | 3 | 62.8 | 1.18e-10 | 0.900 |
 | dataset | 7 | 27.9 | 2.92e-09 | 0.903 |
 
-Python→Rust FFI call overhead (no-op `ping`, 20k calls): **0.03 µs/call** — negligible against multi-millisecond inference.
+Python to Rust call overhead, measured with a no-op call 20,000 times: **0.03 us/call**. Negligible next to inference.
 
 <!-- BENCH:END -->
 
-## Scope and limitations
+## Scope
 
-* Inference only: no autograd, no `torch.compile`, no checkpointing. No
-  quantisation (full f32 safetensors), no batched ensembles (`B=1`, but `B` is
-  kept in tensor shapes), and no stage-0-2 row/column chunking.
-* WASM is CPU SIMD128, not WebGPU.
-* Attention is query-chunked (`Q_CHUNK=128`) so score memory stays
-  `O(H·chunk·N)` instead of `O(H·N²)`; this is mathematically equivalent and
-  is what keeps WASM32 inside its memory budget.
-* Validated on the tiny parity fixture, not the full 24-layer checkpoint.
+* Inference only. No autograd, no `torch.compile`, no checkpointing, no
+  quantisation, no batched ensembles (`B = 1`), no row or column chunking in
+  stages 0 to 2.
+* WASM is CPU SIMD128. There is no WebGPU path.
+* Attention is query-chunked (`Q_CHUNK = 128`), so score memory is
+  `O(H * chunk * N)` instead of `O(H * N^2)`. This is mathematically equivalent
+  and keeps WASM32 inside its memory budget.
+* Validated on the tiny parity fixture. The full 24-layer checkpoint has not
+  been run.

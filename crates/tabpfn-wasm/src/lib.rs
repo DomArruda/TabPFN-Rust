@@ -99,4 +99,38 @@ impl TabPfnWasm {
             .collect();
         Ok(flat)
     }
+
+    /// Post-output-norm row embeddings, flat row-major
+    /// `(n_train + n_test, icl_emsize)`. Contextual representation (depends on
+    /// the training set), not a fixed feature extractor.
+    pub fn encode(
+        &self,
+        x_all: &[f32],
+        n_train: usize,
+        n_test: usize,
+        n_cols: usize,
+        y_train: &[f32],
+        task_type: &str,
+    ) -> Result<Vec<f32>, JsValue> {
+        if x_all.len() != (n_train + n_test) * n_cols {
+            return Err(js_err("x_all size mismatch"));
+        }
+        let task = TaskType::from_str(task_type).map_err(|e| js_err(&e.to_string()))?;
+        let x = Tensor::from_vec(x_all.to_vec(), (1, n_train + n_test, n_cols), &self.model.device)
+            .map_err(|e| js_err(&e.to_string()))?;
+        let emb = self
+            .model
+            .encode(&x, y_train, task)
+            .map_err(|e| js_err(&e.to_string()))?;
+        let r = emb.dim(1).map_err(|e| js_err(&e.to_string()))?;
+        let e = emb.dim(2).map_err(|e| js_err(&e.to_string()))?;
+        let flat = emb
+            .reshape((r, e))
+            .map_err(|e| js_err(&e.to_string()))?
+            .flatten_all()
+            .map_err(|e| js_err(&e.to_string()))?
+            .to_vec1::<f32>()
+            .map_err(|e| js_err(&e.to_string()))?;
+        Ok(flat)
+    }
 }
