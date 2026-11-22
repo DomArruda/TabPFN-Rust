@@ -1,154 +1,14 @@
 # TabPFN-Rust
 
-Inference-only port of TabPFN v3.5 to Rust, using Candle. Ships as a Python
-extension and as a WebAssembly module.
+TabPFN v3.5 inference, compiled to WebAssembly and installable from npm. The
+same Rust core also builds a Python extension and a native binary.
 
-The network is the same as `tabpfn/architectures/tabpfn_v3_5.py`: same stages,
-shapes and config defaults, and the original PyTorch `state_dict` key names, so
-checkpoints load without a rename map. Outputs match PyTorch to about 1e-6 on
-the same weights.
+The network matches `tabpfn/architectures/tabpfn_v3_5.py`: same stages, shapes
+and config defaults, and the original PyTorch `state_dict` key names, so a
+checkpoint loads without a rename map. Outputs agree with PyTorch to about
+1e-6 on the same weights. Inference only, no training, CPU only.
 
-No training, no autograd, no quantisation. CPU only.
-
-## Layout
-
-```
-crates/tabpfn-core/   Rust + Candle model, preprocessing, KV cache
-crates/tabpfn-wasm/   wasm-bindgen bindings (JS/TS)
-crates/tabpfn-py/     PyO3 bindings (CPython extension)
-docs/RUST.md          using the core directly from Rust
-scripts/              fixtures, dataset generation, benchmarks, stats
-main.ts               feature demo
-smoke.test.ts         Bun tests
-```
-
-## Build
-
-```bash
-# Rust core tests
-cargo test -p tabpfn-core
-
-# WASM + JS glue (outputs to pkg/, git-ignored)
-npm run build:wasm
-
-# Python extension (outputs scripts/tabpfn_rs.pyd / .so)
-cargo build -p tabpfn-py --release
-copy target\release\tabpfn_rs.dll scripts\tabpfn_rs.pyd   # Windows
-# cp target/release/libtabpfn_rs.so scripts/tabpfn_rs.so  # Linux/macOS
-```
-
-`scripts/fixtures/model.safetensors` is a small 2-layer model with fixed
-weights. It is committed so the Rust and WASM tests run without PyTorch.
-
-To publish the WASM module as an npm package, see
-[docs/PUBLISH.md](docs/PUBLISH.md).
-
-## Using the bindings
-
-Both bindings take and return flat little-endian `f32` buffers. Row-major,
-shape `(rows, cols)`. Call `fit()` once per training set, then `predict()` as
-often as you like.
-
-### Python
-
-```python
-import numpy as np
-from tabpfn_rs import TabPfn
-
-# weights: raw safetensors bytes
-# config_json: the architecture config as JSON (from the checkpoint metadata)
-m = TabPfn(open("model.safetensors", "rb").read(), config_json)
-
-x_train = np.ascontiguousarray(x_train, dtype=np.float32)
-x_test = np.ascontiguousarray(x_test, dtype=np.float32)
-y_train = np.ascontiguousarray(y_train, dtype=np.float32)
-
-# classification
-m.fit(x_train.tobytes(), len(x_train), x_train.shape[1], y_train.tobytes(), "multiclass")
-logits = np.frombuffer(
-    m.predict(x_test.tobytes(), len(x_test), x_test.shape[1], "multiclass"),
-    dtype="<f4",
-).reshape(len(x_test), -1)
-labels = logits.argmax(axis=1)
-
-# regression: same calls with "regression"; output is (n_test, num_buckets)
-```
-
-One `TabPfn` instance holds one fitted training set. Build a second instance
-for a second dataset.
-
-### JavaScript / TypeScript
-
-```ts
-import init, { TabPfnWasm } from "./pkg/tabpfn_wasm.js";
-
-await init();
-
-// weights: raw safetensors bytes; configJson: architecture config as JSON
-const weights = new Uint8Array(await (await fetch("model.safetensors")).arrayBuffer());
-const m = new TabPfnWasm(weights, configJson);
-
-const xTrain = new Float32Array(flatTrainingRows);
-const xTest = new Float32Array(flatTestRows);
-const yTrain = new Float32Array(trainLabels);
-
-m.fit(xTrain, nTrain, nCols, yTrain, "multiclass");
-const logits = m.predict(xTest, nTest, nCols, "multiclass");
-// logits: Float32Array, row-major (nTest * numOutputs)
-```
-
-The module is built with `-C target-feature=+simd128`. Bun and browsers both
-work; with the `web` target, load it from a page or worker, not from Node's
-`fetch`.
-
-### Output shapes
-
-| task | output | how to read it |
-|---|---|---|
-| `multiclass` | `n_test x max_num_classes` logits | `argmax` per row |
-| `regression` | `n_test x num_buckets` bar logits | softmax, then weighted mean over bucket centres |
-
-Bucket borders are stored in the checkpoint as `heads.regression_borders`
-(`num_buckets + 1` values). Read them from the safetensors file to build the
-centres. The bindings do not expose them yet.
-
-### Row embeddings
-
-`encode()` returns the representation the decoder consumes, `(rows,
-icl_emsize)`. It is contextual, so the same row produces a different vector for
-a different training set. Train rows include their target embedding, so they
-cluster by label; use test rows for a label-free view.
-
-```python
-emb = np.frombuffer(
-    m.encode(x_all.tobytes(), n_train, n_test, n_cols, y_train.tobytes(), "multiclass"),
-    dtype="<f4",
-).reshape(n_train + n_test, -1)
-```
-
-```ts
-const emb = m.encode(xAll, nTrain, nTest, nCols, yTrain, "multiclass");
-```
-
-`python scripts/embed_projection.py --dataset clf_digits_w` projects these with
-PCA, t-SNE and UMAP into `scripts/results/embeddings_*.png`. With the committed
-random-weight fixture the test-row silhouette is 0.00, which is expected: the
-pipeline works, the weights are not trained.
-
-### Core Rust
-
-See [docs/RUST.md](docs/RUST.md) for loading weights, `forward`, `fit` /
-`predict_with_y`, `encode`, and the runnable `basic_usage` example.
-
-## Examples
-
-Runnable consumers of the published package live in [examples](examples):
-
-| runtime | directory | run |
-|---|---|---|
-| Bun | [examples/bun](examples/bun) | `cd examples/bun && bun install && bun run main.ts` |
-| Node | [examples/node](examples/node) | `cd examples/node && npm install && node main.mjs` |
-| browser, no bundler | [examples/browser](examples/browser) | serve the repo root, open the page |
+## Install the WASM package
 
 ```bash
 npm install tabpfn-wasm
@@ -159,66 +19,162 @@ bun add tabpfn-wasm
 ```ts
 import init, { TabPfnWasm } from "tabpfn-wasm";
 
-await init();                                   // once
-const m = new TabPfnWasm(weights, configJson);  // weights: safetensors bytes
-m.fit(xTrain, nTrain, nCols, yTrain, "multiclass");
-const logits = m.predict(xTest, nTest, nCols, "multiclass");
+await init();                                   // once, loads tabpfn_wasm_bg.wasm
+
+const weights = new Uint8Array(await (await fetch("model.safetensors")).arrayBuffer());
+const configJson = await (await fetch("config.json")).text();
+
+const m = new TabPfnWasm(weights, configJson);
+
+m.fit(xTrain, nTrain, nCols, yTrain, "multiclass");           // build the cache
+const logits = m.predict(xTest, nTest, nCols, "multiclass");  // nTest * classes
 ```
 
-The examples read `scripts/fixtures/` (a random-initialised 2-layer model), so
-they run without the licensed checkpoint. Node needs the `.wasm` bytes passed
-to `init()` because the package ships the `web` target; [examples/node](examples/node)
-shows that call.
+`xTrain` and `xTest` are flat, row-major `Float32Array`s of shape
+`(rows, cols)`. `yTrain` is `(rows,)`. Everything comes back as a flat
+`Float32Array`, also row-major.
 
+The package contains code only. Weights are not included; see
+[using the real checkpoint](#using-the-real-checkpoint-optional) or run the
+[examples](examples) against the committed fixture.
 
-### Why caching helps
+### Output shapes
 
-Test rows attend only to training rows, never to each other. The training-side
-work therefore only has to run once. `fit()` stores the inducing hidden states,
-the per-layer ICL keys and values, the decoder keys, the scaler statistics and
-the ECDF context. `predict()` then processes just the new rows.
-
-| cached item | shape | why it can be reused |
+| task | output | how to read it |
 |---|---|---|
-| inducing hidden states | `(B*C, n_ind, E)` per block | built from train rows |
-| ICL keys and values | `(B, N, n_kv_heads_test, head_dim)` per layer | train rows only, already normalised |
-| decoder keys | `(B, N, H_dec, D_dec)` | multiclass only, built from train rows |
-| scaler mean/std | `(C,)` | fitted on train rows |
-| ECDF context | `(3, B, C, K)` | bucket edges from train rows |
+| `"multiclass"` | `nTest * max_num_classes` logits | `argmax` per row |
+| `"regression"` | `nTest * num_buckets` bar logits | softmax, weighted mean over bucket centres |
 
-Cache size for the released config, per estimator:
+Bucket borders are stored in the checkpoint as `heads.regression_borders`
+(`num_buckets + 1` values). Read them from the safetensors file to build the
+centres; the binding does not expose them yet.
 
+### Reuse the cache
+
+Test rows attend only to training rows, never to each other. That makes the
+training-side work reusable: call `fit()` once per training set, then
+`predict()` as often as you like. A single `predict()` is all it takes, but if
+you call it once, skip `fit()` and use `forward()` instead.
+
+```ts
+m.fit(xTrain, nTrain, nCols, yTrain, "multiclass");       // once
+const a = m.predict(xTestA, nTestA, nCols, "multiclass"); // cached
+const b = m.predict(xTestB, nTestB, nCols, "multiclass"); // cached
 ```
-ICL K/V       12,288 * N bytes     12 MB per 1,000 train rows
-decoder keys   1,536 * N bytes     multiclass only
-inducing     196,608 * C bytes     20 MB at 100 columns
-ECDF context  98,304 * C bytes     10 MB at 100 columns
+
+You can also grab the model's internal row representation:
+
+```ts
+const emb = m.encode(xAll, nTrain, nTest, nCols, yTrain, "multiclass");
+// Float32Array, nTrain + nTest rows of icl_emsize floats
 ```
 
-If you only call `predict()` once, skip `fit()` and use the single-pass
-`forward` path instead.
+### Browser, no bundler
+
+The package is an ES module, so an import map is enough:
+
+```html
+<script type="importmap">
+  { "imports": { "tabpfn-wasm": "https://cdn.jsdelivr.net/npm/tabpfn-wasm@0.1.0/tabpfn_wasm.js" } }
+</script>
+<script type="module" src="./main.js"></script>
+```
+
+Serve the page over HTTP. A working page is in
+[examples/browser](examples/browser); it takes optional
+`?model=/path/ckpt.safetensors&config=/path/config.json` parameters.
+
+### Node
+
+The module is built for the `web` target, whose default `init()` fetches the
+`.wasm` over HTTP. Node rejects `file:` URLs in `fetch`, so pass the bytes:
+
+```js
+import init, { TabPfnWasm } from "tabpfn-wasm";
+import { readFileSync } from "node:fs";
+
+const jsUrl = import.meta.resolve("tabpfn-wasm");
+await init({ module_or_path: readFileSync(new URL("tabpfn_wasm_bg.wasm", jsUrl)) });
+```
+
+[examples/node](examples/node) does exactly this.
+
+## Python extension
+
+```bash
+cargo build -p tabpfn-py --release
+Copy-Item target\release\tabpfn_rs.dll scripts\tabpfn_rs.pyd   # Windows
+# cp target/release/libtabpfn_rs.so scripts/tabpfn_rs.so      # Linux/macOS
+```
+
+```python
+import numpy as np
+from tabpfn_rs import TabPfn
+
+m = TabPfn(open("model.safetensors", "rb").read(), config_json)
+
+x_train = np.ascontiguousarray(x_train, dtype=np.float32)
+y_train = np.ascontiguousarray(y_train, dtype=np.float32)
+m.fit(x_train.tobytes(), len(x_train), x_train.shape[1], y_train.tobytes(), "multiclass")
+logits = np.frombuffer(
+    m.predict(x_test.tobytes(), len(x_test), x_test.shape[1], "multiclass"),
+    dtype="<f4",
+).reshape(len(x_test), -1)
+```
+
+## Rust core
+
+The core is a normal Cargo library. See [docs/RUST.md](docs/RUST.md) for
+loading weights, `forward`, `fit` / `predict_with_y`, `encode`, and a runnable
+example.
+
+## Examples
+
+| runtime | directory | run |
+|---|---|---|
+| Bun | [examples/bun](examples/bun) | `cd examples/bun && bun install && bun run main.ts` |
+| Node | [examples/node](examples/node) | `cd examples/node && npm install && node main.mjs` |
+| browser | [examples/browser](examples/browser) | serve the repo root, open the page |
+
+All of them read the committed fixture model by default and accept
+`TABPFN_MODEL` / `TABPFN_CONFIG`.
+
+## Build from source
+
+```bash
+cargo test -p tabpfn-core          # parity tests against PyTorch fixtures
+npm run build:wasm                 # pkg/, git-ignored
+npm run build:py                   # Python extension
+bun test                           # WASM smoke tests
+```
+
+`pkg/` and the compiled extension are build artifacts and are git-ignored. The
+tiny random-weight fixture in `scripts/fixtures/` is committed so the tests run
+without PyTorch.
+
+To publish the npm package, see [docs/PUBLISH.md](docs/PUBLISH.md).
 
 ## Using the real checkpoint (optional)
 
-Everything above runs on a small random-weight fixture. Real predictions need
-the upstream TabPFN v3.5 weights.
+The fixture is a randomly initialised 2-layer model, fine for tests and demos
+but not for predictions.
 
-**License:** the code in this repo is Apache-2.0. The TabPFN-3.5 weights are
-licensed separately by Prior Labs and are **non-commercial**. They are not
-included or redistributed here. Downloading them means accepting
-[their license](https://huggingface.co/Prior-Labs/tabpfn_3_5). Keep them out of
-git (`models/` is ignored).
+**License:** the code here is Apache-2.0. The TabPFN-3.5 weights are licensed
+separately by Prior Labs and are **non-commercial**. They are not included or
+redistributed here. Downloading them means accepting
+[their license](https://huggingface.co/Prior-Labs/tabpfn_3_5). `models/` is
+git-ignored so they cannot be committed by accident.
 
 ```powershell
 python scripts/fetch_checkpoint.py
-# models/tabpfn-v3.5-20260909.safetensors   ~ the weights
-# models/config.json                        ~ architecture config
+# models/tabpfn-v3.5-20260909.safetensors
+# models/config.json
 ```
 
 The script downloads from the public `Prior-Labs/tabpfn_3_5` repository, reads
-the architecture config out of the safetensors header metadata, and checks the
-keys against what this port requires. Use `--variant fast` for the smaller
-checkpoint, or `--file path.safetensors` to read a file you already have.
+the architecture config from the safetensors header metadata, and checks the
+keys this port needs. `--variant fast` picks the smaller checkpoint,
+`--file path` reads one you already have.
 
 Point the examples at it:
 
@@ -228,20 +184,13 @@ $env:TABPFN_CONFIG = "models/config.json"
 cd examples/bun; bun run main.ts
 ```
 
-The browser example takes query parameters:
-`?model=/models/tabpfn-v3.5-20260909.safetensors&config=/models/config.json`.
-
-For Rust, pass the same two paths to `TabPFNV3p5::from_safetensors` and
-`serde_json::from_str` (see [docs/RUST.md](docs/RUST.md)).
-
-One honest caveat: this port has only been validated numerically against the
-tiny fixture. The full checkpoint is a large download and has not been run
-here. If upstream changes the config schema, the fetch script reports the
-missing fields instead of failing silently.
+Caveat: the port has only been validated numerically against the tiny fixture.
+The full checkpoint has not been run here. If upstream changes the config
+schema, the fetch script reports the missing fields instead of failing silently.
 
 ## Nerd stuff
 
-Benchmarks and hypothesis tests. Everything here is reproducible from the
+Benchmarks and hypothesis tests across the four runtimes. Reproducible from the
 committed fixtures.
 
 ### What is compared
@@ -295,10 +244,10 @@ python scripts/gen_datasets.py
 cargo build --release -p tabpfn-core --example harness_datasets
 npm run build:wasm
 cargo build -p tabpfn-py --release
-copy target\release\tabpfn_rs.dll scripts\tabpfn_rs.pyd
+Copy-Item target\release\tabpfn_rs.dll scripts\tabpfn_rs.pyd
 
 python scripts/run_benchmarks.py --reps 10
-python scripts/analyze.py --write-readme    # rewrites the block below
+python scripts/analyze.py --write-readme
 ```
 
 Tests: one-way ANOVA per dataset on speed and memory, a pooled two-way ANOVA
@@ -466,6 +415,17 @@ Python to Rust call overhead, measured with a no-op call 20,000 times: **0.03 us
 
 <!-- BENCH:END -->
 
+## Layout
+
+```
+crates/tabpfn-core/   Rust + Candle model, preprocessing, KV cache
+crates/tabpfn-wasm/   wasm-bindgen bindings (the npm package)
+crates/tabpfn-py/     PyO3 bindings
+docs/                 Rust usage, publishing
+examples/             Bun, Node and browser consumers
+scripts/              fixtures, datasets, benchmarks, stats
+```
+
 ## Scope
 
 * Inference only. No autograd, no `torch.compile`, no checkpointing, no
@@ -473,7 +433,6 @@ Python to Rust call overhead, measured with a no-op call 20,000 times: **0.03 us
   stages 0 to 2.
 * WASM is CPU SIMD128. There is no WebGPU path.
 * Attention is query-chunked (`Q_CHUNK = 128`), so score memory is
-  `O(H * chunk * N)` instead of `O(H * N^2)`. This is mathematically equivalent
-  and keeps WASM32 inside its memory budget.
-* Validated on the tiny parity fixture. The full 24-layer checkpoint has not
-  been run.
+  `O(H * chunk * N)` instead of `O(H * N^2)`. Mathematically equivalent, and it
+  keeps WASM32 inside its memory budget.
+* Validated on the tiny parity fixture.
