@@ -1,0 +1,11 @@
+{
+  "name": "tabpfn-wasm-node-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node main.mjs"
+  },
+  "dependencies": {
+    "tabpfn-wasm": "^0.1.0"
+  }
+}

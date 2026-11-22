@@ -15,15 +15,21 @@ venv/
 *.egg-info/
 
 # ---- Node ----
-/node_modules/
-/dist/
+node_modules/
+dist/
 
 # ---- Benchmark scratch (raw.json / stats.json are committed) ----
 scripts/results/tmp/
 scripts/results/per_run/
 scripts/fixtures/stages.safetensors
 
+# ---- Downloaded model weights (never commit; licensed separately) ----
+models/
+
 # ---- OS / editor ----
 .DS_Store
 Thumbs.db
 *.log
+
+# npm pack output
+*.tgz

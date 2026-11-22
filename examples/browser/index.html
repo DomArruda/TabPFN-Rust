@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>TabPFN WASM in the browser</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 2rem; max-width: 44rem; }
+      pre { background: #f4f4f4; padding: 1rem; overflow: auto; }
+      .note { color: #555; }
+    </style>
+    <!-- The package is consumed straight from the npm CDN. -->
+    <script type="importmap">
+      {
+        "imports": {
+          "tabpfn-wasm": "https://cdn.jsdelivr.net/npm/tabpfn-wasm@0.1.0/tabpfn_wasm.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <h1>TabPFN WASM</h1>
+    <p class="note">
+      Serve the repository root over HTTP, for example
+      <code>python -m http.server 8000</code>, then open
+      <code>http://localhost:8000/examples/browser/</code>.
+    </p>
+    <pre id="out">loading…</pre>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

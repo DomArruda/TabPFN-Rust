@@ -140,6 +140,37 @@ pipeline works, the weights are not trained.
 See [docs/RUST.md](docs/RUST.md) for loading weights, `forward`, `fit` /
 `predict_with_y`, `encode`, and the runnable `basic_usage` example.
 
+## Examples
+
+Runnable consumers of the published package live in [examples](examples):
+
+| runtime | directory | run |
+|---|---|---|
+| Bun | [examples/bun](examples/bun) | `cd examples/bun && bun install && bun run main.ts` |
+| Node | [examples/node](examples/node) | `cd examples/node && npm install && node main.mjs` |
+| browser, no bundler | [examples/browser](examples/browser) | serve the repo root, open the page |
+
+```bash
+npm install tabpfn-wasm
+# or
+bun add tabpfn-wasm
+```
+
+```ts
+import init, { TabPfnWasm } from "tabpfn-wasm";
+
+await init();                                   // once
+const m = new TabPfnWasm(weights, configJson);  // weights: safetensors bytes
+m.fit(xTrain, nTrain, nCols, yTrain, "multiclass");
+const logits = m.predict(xTest, nTest, nCols, "multiclass");
+```
+
+The examples read `scripts/fixtures/` (a random-initialised 2-layer model), so
+they run without the licensed checkpoint. Node needs the `.wasm` bytes passed
+to `init()` because the package ships the `web` target; [examples/node](examples/node)
+shows that call.
+
+
 ### Why caching helps
 
 Test rows attend only to training rows, never to each other. The training-side
@@ -166,6 +197,47 @@ ECDF context  98,304 * C bytes     10 MB at 100 columns
 
 If you only call `predict()` once, skip `fit()` and use the single-pass
 `forward` path instead.
+
+## Using the real checkpoint (optional)
+
+Everything above runs on a small random-weight fixture. Real predictions need
+the upstream TabPFN v3.5 weights.
+
+**License:** the code in this repo is Apache-2.0. The TabPFN-3.5 weights are
+licensed separately by Prior Labs and are **non-commercial**. They are not
+included or redistributed here. Downloading them means accepting
+[their license](https://huggingface.co/Prior-Labs/tabpfn_3_5). Keep them out of
+git (`models/` is ignored).
+
+```powershell
+python scripts/fetch_checkpoint.py
+# models/tabpfn-v3.5-20260909.safetensors   ~ the weights
+# models/config.json                        ~ architecture config
+```
+
+The script downloads from the public `Prior-Labs/tabpfn_3_5` repository, reads
+the architecture config out of the safetensors header metadata, and checks the
+keys against what this port requires. Use `--variant fast` for the smaller
+checkpoint, or `--file path.safetensors` to read a file you already have.
+
+Point the examples at it:
+
+```powershell
+$env:TABPFN_MODEL  = "models/tabpfn-v3.5-20260909.safetensors"
+$env:TABPFN_CONFIG = "models/config.json"
+cd examples/bun; bun run main.ts
+```
+
+The browser example takes query parameters:
+`?model=/models/tabpfn-v3.5-20260909.safetensors&config=/models/config.json`.
+
+For Rust, pass the same two paths to `TabPFNV3p5::from_safetensors` and
+`serde_json::from_str` (see [docs/RUST.md](docs/RUST.md)).
+
+One honest caveat: this port has only been validated numerically against the
+tiny fixture. The full checkpoint is a large download and has not been run
+here. If upstream changes the config schema, the fetch script reports the
+missing fields instead of failing silently.
 
 ## Nerd stuff
 

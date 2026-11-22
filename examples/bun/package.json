@@ -1,0 +1,11 @@
+{
+  "name": "tabpfn-wasm-bun-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run main.ts"
+  },
+  "dependencies": {
+    "tabpfn-wasm": "^0.1.0"
+  }
+}

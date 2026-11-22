@@ -27,21 +27,23 @@ too (`bun publish`).
 
 ## 2. Pick a package name
 
-Use a scope. Unscoped `tabpfn-wasm` may be taken, and this is an unofficial
-port, so a scope also avoids implying endorsement.
+The repo uses the unscoped name `tabpfn-wasm`, which was free when this was
+written. Unscoped names are global and first-come-first-served, so check before
+publishing. If it is taken, switch to a scope you own (`@your-user/tabpfn-wasm`
+or an org) by setting `NPM_NAME`.
 
 ```bash
-npm view @your-scope/tabpfn-wasm version   # 404 means the name is free
+npm view tabpfn-wasm version   # 404 means the name is free
 ```
 
 ## 3. Build the package
 
 ```bash
-# defaults: name @your-scope/tabpfn-wasm, version from crates/tabpfn-wasm/Cargo.toml
+# defaults: name tabpfn-wasm, version from crates/tabpfn-wasm/Cargo.toml
 python scripts/build_wasm_pkg.py
 
 # or set them explicitly
-$env:NPM_NAME="@your-scope/tabpfn-wasm"
+$env:NPM_NAME="tabpfn-wasm"
 $env:NPM_VERSION="0.1.0"
 python scripts/build_wasm_pkg.py
 ```
@@ -72,7 +74,7 @@ Optionally install the tarball in a scratch project to prove it resolves:
 npm pack ./pkg --pack-destination $env:TEMP
 mkdir scratch; cd scratch
 bun init -y
-bun add $env:TEMP\your-scope-tabpfn-wasm-0.1.0.tgz
+bun add $env:TEMP\tabpfn-wasm-0.1.0.tgz
 ```
 
 ## 5. Publish
@@ -83,19 +85,19 @@ npm publish ./pkg --access public
 bun publish ./pkg --access public
 ```
 
-`--access public` is required for scoped packages. Publishing is permanent:
-bump the version for every release (npm rejects a duplicate version).
+`--access public` is the default for unscoped packages and required for scoped
+ones. Publishing is permanent: bump the version for every release.
 
 ## 6. Consume
 
 ### Bun
 
 ```bash
-bun add @your-scope/tabpfn-wasm
+bun add tabpfn-wasm
 ```
 
 ```ts
-import init, { TabPfnWasm } from "@your-scope/tabpfn-wasm";
+import init, { TabPfnWasm } from "tabpfn-wasm";
 
 await init();                       // must run once before constructing the model
 
@@ -116,10 +118,10 @@ The `web` target uses `fetch`, which Node rejects for `file:` URLs. Pass the
 bytes instead:
 
 ```js
-import init, { TabPfnWasm } from "@your-scope/tabpfn-wasm";
+import init, { TabPfnWasm } from "tabpfn-wasm";
 import { readFileSync } from "node:fs";
 
-await init({ module_or_path: readFileSync("node_modules/@your-scope/tabpfn-wasm/tabpfn_wasm_bg.wasm") });
+await init({ module_or_path: readFileSync("node_modules/tabpfn-wasm/tabpfn_wasm_bg.wasm") });
 ```
 
 Alternatively build a second package with `wasm-bindgen --target nodejs` and

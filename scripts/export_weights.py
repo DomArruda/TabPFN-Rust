@@ -119,6 +119,9 @@ def main() -> int:
         tensors[f"{task}.logits_cached"] = flat(cached_pred)
 
     save_file(tensors, os.path.join(out_dir, "golden.safetensors"), metadata={"format": "pt"})
+    with open(os.path.join(out_dir, "config.json"), "w", encoding="utf-8") as f:
+        json.dump(cfg.__dict__, f, indent=2)
+        f.write("\n")
     print(f"wrote {out_dir}/model.safetensors and golden.safetensors")
     return 0
 

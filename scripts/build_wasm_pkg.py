@@ -5,7 +5,7 @@ Build the WASM binding and turn `pkg/` into a publishable npm package.
     npm publish ./pkg --access public
 
 Environment overrides:
-    NPM_NAME      package name (default "@your-scope/tabpfn-wasm")
+    NPM_NAME      package name (default "tabpfn-wasm")
     NPM_VERSION   package version (default: version from crates/tabpfn-wasm/Cargo.toml)
 
 The output is the `web` target: an ES module plus a `.wasm` file and generated
@@ -42,7 +42,7 @@ def bindgen_version() -> str:
 
 
 def main() -> int:
-    name = os.environ.get("NPM_NAME", "@your-scope/tabpfn-wasm")
+    name = os.environ.get("NPM_NAME", "tabpfn-wasm")
     version = os.environ.get("NPM_VERSION", cargo_version())
 
     # wasm-bindgen's schema version must match the crate exactly.
