@@ -5,7 +5,9 @@
   "type": "module",
   "description": "A port of TabPFN to Rust with bindings in Python and WASM",
   "scripts": {
-    "build:wasm": "cargo build -p tabpfn-wasm --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/tabpfn_wasm.wasm --out-dir pkg --target web --no-typescript",
+    "build:wasm": "cargo build -p tabpfn-wasm --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/tabpfn_wasm.wasm --out-dir pkg --target web",
+    "pkg:wasm": "python scripts/build_wasm_pkg.py",
+    "pack:wasm": "npm pack --dry-run ./pkg",
     "build:py": "cargo build -p tabpfn-py --release",
     "build": "npm run build:wasm && tsc -p tsconfig.json",
     "test:rust": "cargo test -p tabpfn-core",

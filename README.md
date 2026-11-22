@@ -40,6 +40,9 @@ copy target\release\tabpfn_rs.dll scripts\tabpfn_rs.pyd   # Windows
 `scripts/fixtures/model.safetensors` is a small 2-layer model with fixed
 weights. It is committed so the Rust and WASM tests run without PyTorch.
 
+To publish the WASM module as an npm package, see
+[docs/PUBLISH.md](docs/PUBLISH.md).
+
 ## Using the bindings
 
 Both bindings take and return flat little-endian `f32` buffers. Row-major,

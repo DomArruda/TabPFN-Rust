@@ -8,7 +8,7 @@ pub const Q_CHUNK: usize = 128;
 
 /// q: (B, S, H, D), k/v: (B, J, Hkv, D). GQA: head h uses kv head h/(H/Hkv).
 pub fn sdpa(q: &Tensor, k: &Tensor, v: &Tensor) -> crate::Result<Tensor> {
-    let (b, s, h, d) = (q.dim(0)?, q.dim(1)?, q.dim(2)?, q.dim(3)?);
+    let (_b, s, h, d) = (q.dim(0)?, q.dim(1)?, q.dim(2)?, q.dim(3)?);
     let hkv = k.dim(2)?;
     let scale = (d as f32).sqrt();
 

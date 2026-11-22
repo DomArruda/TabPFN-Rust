@@ -4,8 +4,7 @@ use candle_core::Tensor;
 use candle_nn::VarBuilder;
 
 use crate::attention::sdpa;
-use crate::layers::{gelu, linear_no_bias, Mlp, RmsNorm, RotaryEmbedding, SoftmaxScalingMlp};
-use crate::log::layer_norm_forward;
+use crate::layers::{linear_no_bias, Mlp, RmsNorm, RotaryEmbedding, SoftmaxScalingMlp};
 
 pub struct CrossAttention {
     pub q_w: Tensor,
@@ -24,7 +23,7 @@ impl CrossAttention {
         let head_dim = emsize / num_heads;
         let hd = head_dim * num_heads;
         let g = |n: &str, s: (usize, usize)| vb.get(s, &format!("{prefix}.attn.{n}.weight"));
-        let g1 = |n: &str, s: usize| vb.get(s, &format!("{prefix}.attn.{n}.weight"));
+        let _g1 = |n: &str, s: usize| vb.get(s, &format!("{prefix}.attn.{n}.weight"));
         Ok(Self {
             q_w: g("q_projection", (hd, emsize))?,
             k_w: g("k_projection", (hd, emsize))?,

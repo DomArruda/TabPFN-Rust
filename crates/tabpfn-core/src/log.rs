@@ -1,7 +1,7 @@
 //! Manual LayerNorm (avoids candle_nn::LayerNorm Device/Module quirks).
 //! y = (x - mean) / sqrt(var + eps) * w + b, over last dim, f32.
 
-use candle_core::{Tensor, D, DType, Device};
+use candle_core::{Tensor, D};
 
 pub fn layer_norm_forward(x: &Tensor, w: &Tensor, b: &Tensor, eps: f64) -> crate::Result<Tensor> {
     let mean = x.mean_keepdim(D::Minus1)?;

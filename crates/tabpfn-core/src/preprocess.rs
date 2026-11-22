@@ -194,7 +194,7 @@ pub fn build_ecdf_context(x_bnc: &[f32], b: usize, n: usize, c: usize, num_train
                 let below = distinct_idx.partition_point(|&d| d < t);
                 let at_most = distinct_idx.partition_point(|&d| d <= t);
                 let edge = sorted[below.min(sorted.len().saturating_sub(1))];
-                let base = ((bi * c + ci) * k + ki);
+                let base = (bi * c + ci) * k + ki;
                 data[base] = edge;
                 data[b * c * k + base] = below as f32; // middle plane
                 data[2 * b * c * k + base] = at_most as f32; // last plane

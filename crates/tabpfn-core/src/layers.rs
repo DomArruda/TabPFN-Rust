@@ -2,7 +2,7 @@
 //! `VarBuilder::get` signature in candle 0.10 is `get(shape, name)`.
 
 use candle_core::{Device, Tensor};
-use candle_nn::{Module, VarBuilder};
+use candle_nn::VarBuilder;
 
 /// RMSNorm over the last dim. eps = f32::EPSILON (torch default).
 pub struct RmsNorm {

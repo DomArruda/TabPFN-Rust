@@ -136,7 +136,7 @@ impl YEncoder {
             crate::layers::linear(&y_col, &self.w, self.b.as_ref().unwrap())?.reshape((b, n, self.w.dim(0)?))?
         } else {
             let flat = y_bn.reshape((b * n,))?.to_vec1::<f32>()?;
-            let ids: Vec<u32> = flat.iter().map(|&v| (v as u32)).collect();
+            let ids: Vec<u32> = flat.iter().map(|&v| v as u32 ).collect();
             embedding_lookup(&ids, &self.w)?.reshape((b, n, self.w.dim(1)?))?
         };
         crate::log::layer_norm_forward(&out, &self.ln_w, &self.ln_b, 1e-5)
@@ -281,7 +281,7 @@ pub struct TabPFNV3p5 {
 impl TabPFNV3p5 {
     pub fn from_safetensors(bytes: &[u8], config: TabPFNV3p5Config, device: &Device) -> crate::Result<Self> {
         config.validate()?;
-        let tensors = safetensors::SafeTensors::deserialize(bytes).map_err(|e| Error::Safetensors(e.to_string()))?;
+        let _tensors = safetensors::SafeTensors::deserialize(bytes).map_err(|e| Error::Safetensors(e.to_string()))?;
         let vb = candle_nn::VarBuilder::from_slice_safetensors(bytes, candle_core::DType::F32, device)
             .map_err(|e| Error::Safetensors(e.to_string()))?;
         Self::from_var_builder(vb, config, device)
@@ -476,17 +476,6 @@ impl TabPFNV3p5 {
         cache: Option<&TabPFNV3p5Cache>,
         x_is_test_only: bool,
     ) -> crate::Result<(Tensor, crate::preprocess::ScalerCache, crate::preprocess::EcdfContext, Vec<Tensor>)> {
-        let trace = std::env::var("TABPFN_STAGE").ok();
-        let trace_enabled = trace.is_some();
-        let dump = |name: &str, t: &Tensor| -> crate::Result<()> {
-            if trace.as_deref() == Some(name) {
-                let v = t.flatten_all()?.to_vec1::<f32>()?;
-                let s: f32 = v.iter().map(|x| x.abs()).sum();
-                eprintln!("{name}[:8]={:?} sum={s}", &v[..8.min(v.len())]);
-            }
-            Ok(())
-        };
-        let _ = trace_enabled;
         let (b, r_in, c) = (x_brc.dim(0)?, x_brc.dim(1)?, x_brc.dim(2)?);
         let n = y_train.len();
         let x_vec = x_brc.to_vec3::<f32>()?;
@@ -569,15 +558,6 @@ impl TabPFNV3p5 {
         let grouped = crate::preprocess::group_features(&scaled, &nan_ind_s, &ecdf_s, b, rows_r, c, self.config.feature_group_size);
         let grouped_t = Tensor::from_vec(grouped.clone(), (b, rows_r, c, 3 * self.config.feature_group_size), &self.device)?;
         let mut x_emb = self.x_embed.forward(&grouped_t)?;
-        let dump2 = |name: &str, t: &Tensor| -> crate::Result<()> {
-            if std::env::var("TABPFN_STAGE").ok().as_deref() == Some(name) {
-                let v = t.flatten_all()?.to_vec1::<f32>()?;
-                let s: f32 = v.iter().map(|x| x.abs()).sum();
-                eprintln!("{name}[:8]={:?} sum={s}", &v[..8.min(v.len())]);
-            }
-            Ok(())
-        };
-        dump2("x_embed", &x_emb)?;
 
         if !running_from_cache && n > 0 {
             let y_prep = self.prepare_y_col(y_train, task);
@@ -596,10 +576,8 @@ impl TabPFNV3p5 {
         let cached_hidden: Option<Vec<Tensor>> = cache.filter(|c| !c.is_empty()).map(|c| c.inducing_hidden.clone());
         let num_train_for_dist = if running_from_cache { 0 } else { n };
         let (x_dist, new_hidden) = self.dist_embed.forward(&x_emb, num_train_for_dist, cached_hidden.as_deref())?;
-        dump("x_dist", &x_dist)?;
         let inducing_hidden = if new_hidden.is_empty() { cached_hidden.clone().unwrap_or_default() } else { new_hidden };
         let x_agg = self.col_agg.forward(&x_dist)?;
-        dump("x_agg", &x_agg)?;
         Ok((x_agg, scaler, ecdf_ctx, inducing_hidden))
     }
 
