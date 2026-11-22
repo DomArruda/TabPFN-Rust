@@ -587,7 +587,40 @@ impl TabPFNV3p5 {
     }
 
     pub fn predict_with_y(&self, cache: &TabPFNV3p5Cache, x_test: &Tensor, y_train: &[f32], task: TaskType) -> crate::Result<Vec<f32>> {
-        let (b, m, _) = (x_test.dim(0)?, x_test.dim(1)?, x_test.dim(2)?);
+        let (b, m, c) = (x_test.dim(0)?, x_test.dim(1)?, x_test.dim(2)?);
+        // Guard rails: a cache is only valid for the exact training set it was
+        // built from (same task, same column count, same train targets).
+        if c != cache.n_cols {
+            return Err(Error::Shape(format!(
+                "cache was fitted on {} columns but predict got {}; re-run fit() on this data",
+                cache.n_cols, c
+            )));
+        }
+        if b != cache.train_shape.0 {
+            return Err(Error::Shape(format!(
+                "cache batch {} != predict batch {b}",
+                cache.train_shape.0
+            )));
+        }
+        if y_train.len() != cache.num_train {
+            return Err(Error::Shape(format!(
+                "cache was fitted on {} train rows but {} targets were passed",
+                cache.num_train,
+                y_train.len()
+            )));
+        }
+        if cache.kv.len() != self.icl_blocks.len() {
+            return Err(Error::Shape(format!(
+                "cache has {} ICL layers, model has {}",
+                cache.kv.len(),
+                self.icl_blocks.len()
+            )));
+        }
+        if task == TaskType::Multiclass && cache.decoder_keys.is_none() {
+            return Err(Error::Shape(
+                "multiclass predict needs decoder keys; this cache was fitted for regression".into(),
+            ));
+        }
         let stages_out = self.stages_0_to_2_impl(x_test, y_train, task, Some(cache), true)?.0;
         let mut x = stages_out.reshape((b, m, self.config.icl_emsize()))?;
         for (i, block) in self.icl_blocks.iter().enumerate() {

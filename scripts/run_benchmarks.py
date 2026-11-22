@@ -95,6 +95,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reps", type=int, default=10)
     ap.add_argument("--only", default=None, help="single dataset name")
+    ap.add_argument("--runtimes", default=None, help="comma-separated subset")
     ap.add_argument("--quick", action="store_true", help="skip baseline mode")
     args = ap.parse_args()
 
@@ -106,15 +107,23 @@ def main() -> int:
     if args.only:
         datasets = [d for d in datasets if d == args.only]
 
-    runtimes = ["python_pytorch", "python_bindings", "rust_native", "wasm_bun"]
+    all_runtimes = ["python_pytorch", "python_bindings", "rust_native", "wasm_bun"]
+    runtimes = all_runtimes
+    if args.runtimes:
+        runtimes = [r.strip() for r in args.runtimes.split(",") if r.strip()]
+        bad = [r for r in runtimes if r not in all_runtimes]
+        if bad:
+            raise SystemExit(f"unknown runtime(s): {bad}")
     modes = ["full", "cached"] + ([] if args.quick else ["baseline"])
 
     records: list[dict] = []
     total = len(runtimes) * len(datasets) * len(modes)
     i = 0
-    for runtime in runtimes:
-        for dataset in datasets:
-            for mode in modes:
+    # Interleave runtimes inside each (dataset, mode) so machine drift/thermal
+    # effects hit every runtime equally instead of biasing the first one.
+    for dataset in datasets:
+        for mode in modes:
+            for runtime in runtimes:
                 i += 1
                 print(f"[{i:3d}/{total}] {runtime:16s} {dataset:16s} {mode:8s}", flush=True)
                 rec = run_one(runtime, dataset, mode, args.reps)
@@ -126,11 +135,17 @@ def main() -> int:
                     print(f"    rss={rec['peak_rss_mb']:7.1f}MB  mean={mean:8.3f}ms  n={len(t)}")
                 records.append(rec)
 
-    (RES / "raw.json").write_text(json.dumps(records, indent=1))
+    raw_path = RES / "raw.json"
+    merged: dict = {}
+    if raw_path.exists():
+        for r in json.loads(raw_path.read_text()):
+            merged[(r["runtime"], r["dataset"], r["mode"])] = r
+    for r in records:
+        merged[(r["runtime"], r["dataset"], r["mode"])] = r
+    raw_path.write_text(json.dumps(list(merged.values()), indent=1))
     fails = [r for r in records if "error" in r]
-    print(f"\nwrote {RES/'raw.json'}  ({len(records)} records, {len(fails)} failures)")
+    print(f"\nwrote {raw_path}  ({len(merged)} total, {len(records)} this run, {len(fails)} failures)")
     return 1 if fails else 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -43,6 +43,100 @@ git-ignored. The `scripts/fixtures/model.safetensors` test fixture (a tiny
 2-layer model with deterministic weights) is committed so the Rust and WASM
 tests run without a Python environment.
 
+## KV caching: what `fit()` stores, and how to use it
+
+TabPFN's ICL stage lets test rows attend **only to training rows** — never to
+each other. Test predictions are therefore conditionally independent given the
+training set, so everything that depends solely on the training data can be
+computed once and reused across `predict()` calls. That is exactly what
+`fit()` does.
+
+| cached field | shape | why it is reusable |
+|---|---|---|
+| `inducing_hidden` (per dist. block) | `(B·C, n_ind, E)` | inducing points attend to train rows only |
+| `kv[layer]` (K and V) | `(B, N, n_kv_heads_test, head_dim)` per layer | ICL keys/values are train-only, already `k_norm`'d and sliced to the test-only heads |
+| `decoder_keys` (multiclass) | `(B, N, H_dec, D_dec)` | many-class decoder keys come from train rows only |
+| `scaler_mean` / `scaler_std` | `(C,)` | fitted on train rows |
+| `ecdf_context` | `(3, B, C, K)` | ECDF bucket edges built from train rows |
+
+`predict(X_test)` then runs only the test-row path: cell embedding, the second
+distribution-attention pass (test → cached inducing hidden), column
+aggregation, ICL queries against the cached K/V, and the decoder queries.
+Cost is **O(M)** in test rows and independent of `N`.
+
+### Same operation on each surface
+
+**Rust**
+
+```rust
+let cache = model.fit(&x_train, &y_train, TaskType::Multiclass)?;         // once
+let out   = model.predict_with_y(&cache, &x_test, &y_train, TaskType::Multiclass)?; // many
+```
+
+**Python (PyO3 binding)**
+
+```python
+from tabpfn_rs import TabPfn
+m = TabPfn(weights, config_json)
+m.fit(x_train.tobytes(), n_train, n_cols, y_train.tobytes(), "multiclass")
+out = m.predict(x_test.tobytes(), n_test, n_cols, "multiclass")
+```
+
+**WASM / TypeScript**
+
+```ts
+const m = new TabPfnWasm(weights, configJson);
+m.fit(xTrain, nTrain, nCols, yTrain, "multiclass");
+const out = m.predict(xTest, nTest, nCols, "multiclass");
+```
+
+**PyTorch reference (upstream TabPFN)** — the same two-step pattern already
+exists there, either high-level or via the explicit cache:
+
+```python
+clf = TabPFNClassifier(fit_mode="fit_with_cache")   # high level
+clf.fit(X, y)
+probs = clf.predict(X_test)                         # reuses the cache
+
+# low level (this is what the benchmark harness does)
+_, cache = model.forward(x_all, y, "multiclass", return_kv_cache=True)
+logits = model.forward(x_test, y, "multiclass", kv_cache=cache, x_is_test_only=True)
+```
+
+### What it buys
+
+Caching removes the training-row work from the hot path, so the win scales with
+`N` and shrinks as the per-row cost grows with feature count. On iris-scale
+data a cached `predict` is single-digit milliseconds; on the widest table it is
+tens of milliseconds. The exact per-dataset numbers, and a
+*Cached vs full (mean over datasets)* summary, are generated in the benchmark
+section below by `python scripts/analyze.py --write-readme`.
+
+### Cache size
+
+For the released config (`nlayers=24`, `head_dim=64`, `n_kv_heads_test=1`,
+`6×64` decoder, `128` inducing points, `E=128`, `K=8192`), per estimator:
+
+```
+ICL K/V       12,288 · N  bytes     (12 MB per 1,000 train rows)
+decoder keys   1,536 · N  bytes     (multiclass only)
+inducing     196,608 · C  bytes     (20 MB at C = 100)
+ECDF context  98,304 · C  bytes     (10 MB at C = 100)
+```
+
+The benchmark's tiny config (`E=32`, 2 layers, 16 inducing points, `K=8`) is
+correspondingly small (~0.5 MB for the widest dataset).
+
+### Guard rails and caveats
+
+* A cache is valid only for the exact training set it was built from. The Rust
+  `predict_with_y` now rejects a mismatched column count, batch size, train-row
+  count, layer count, or a regression cache used for multiclass — with an
+  explicit message instead of silently returning garbage.
+* Multiclass caches carry `decoder_keys`; regression caches do not (and are
+  smaller).
+* Cached `predict` still costs O(M) per test row; chunk very large test sets.
+
 ## Benchmark: 4 runtimes, identical data
 
 We compare the same inference workload across:
@@ -120,8 +214,8 @@ Measured on 8 datasets x 10 reps; equivalence tolerance `0.0001`. Speed ANOVAs u
 
 ### Headline
 
-* **full**: Rust-native beats PyTorch on 4/8 datasets (clf_iris_nan, clf_iris_s, clf_wine_m, reg_diabetes_s); PyTorch wins on clf_breast_l, clf_digits_w, reg_synth_m, reg_synth_w. Interaction F=140, p=1.29e-137, partial η²=0.91 — the ranking is **dataset-dependent**, so no single runtime is universally fastest.
-* **cached**: Rust-native beats PyTorch on 7/8 datasets (clf_breast_l, clf_digits_w, clf_iris_nan, clf_iris_s, clf_wine_m, reg_diabetes_s, reg_synth_m); PyTorch wins on reg_synth_w. Interaction F=493, p=6.42e-212, partial η²=0.97 — the ranking is **dataset-dependent**, so no single runtime is universally fastest.
+* **full**: Rust-native beats PyTorch on 3/8 datasets (clf_iris_nan, clf_iris_s, reg_diabetes_s); PyTorch wins on clf_breast_l, clf_digits_w, clf_wine_m, reg_synth_m, reg_synth_w. Interaction F=190, p=3.59e-155, partial η²=0.93 — the ranking is **dataset-dependent**, so no single runtime is universally fastest.
+* **cached**: Rust-native beats PyTorch on 5/8 datasets (clf_iris_nan, clf_iris_s, clf_wine_m, reg_diabetes_s, reg_synth_m); PyTorch wins on clf_breast_l, clf_digits_w, reg_synth_w. Interaction F=478, p=4.07e-210, partial η²=0.97 — the ranking is **dataset-dependent**, so no single runtime is universally fastest.
 
 The Rust advantage appears where per-operation overhead dominates (few features, short rows) and disappears on wide tables, where the ported per-head SDPA loop and Candle's small-matrix kernels lose to PyTorch's BLAS-backed batched ops. The cached path pushes the crossover out because train-row work is paid once.
 
@@ -129,65 +223,74 @@ The Rust advantage appears where per-operation overhead dominates (few features,
 
 | dataset | Python (PyTorch) (ms) | Python (PyO3) (ms) | Rust native (ms) | WASM (Bun) (ms) | fastest |
 |---|---:|---:|---:|---:|---:|
-| clf_breast_l | 105.35 ± 15.25 | 277.70 ± 75.09 | 211.06 ± 8.27 | 329.60 ± 100.72 | Python (PyTorch) |
-| clf_digits_w | 116.04 ± 16.62 | 479.21 ± 137.25 | 337.63 ± 60.09 | 740.46 ± 321.69 | Python (PyTorch) |
-| clf_iris_nan | 53.00 ± 4.21 | 9.49 ± 0.55 | 9.75 ± 0.52 | 11.97 ± 0.86 | Python (PyO3) |
-| clf_iris_s | 46.84 ± 11.12 | 7.83 ± 0.65 | 7.52 ± 0.39 | 14.77 ± 5.58 | Rust native |
-| clf_wine_m | 65.37 ± 5.52 | 40.92 ± 1.65 | 51.73 ± 2.66 | 50.85 ± 4.48 | Python (PyO3) |
-| reg_diabetes_s | 40.52 ± 2.66 | 19.73 ± 0.74 | 22.39 ± 0.53 | 19.64 ± 2.34 | WASM (Bun) |
-| reg_synth_m | 52.00 ± 8.14 | 62.21 ± 2.57 | 62.26 ± 3.82 | 87.46 ± 5.49 | Python (PyTorch) |
-| reg_synth_w | 88.23 ± 14.84 | 433.83 ± 113.19 | 349.04 ± 62.61 | 739.68 ± 238.72 | Python (PyTorch) |
+| clf_breast_l | 56.97 ± 1.83 | 184.30 ± 2.92 | 187.31 ± 6.87 | 254.29 ± 1.98 | Python (PyTorch) |
+| clf_digits_w | 64.66 ± 1.45 | 330.26 ± 43.63 | 316.55 ± 45.67 | 529.66 ± 199.15 | Python (PyTorch) |
+| clf_iris_nan | 19.32 ± 1.70 | 8.53 ± 0.41 | 10.03 ± 0.32 | 9.60 ± 0.40 | Python (PyO3) |
+| clf_iris_s | 14.55 ± 2.13 | 7.07 ± 0.39 | 8.36 ± 0.61 | 8.82 ± 1.29 | Python (PyO3) |
+| clf_wine_m | 26.88 ± 1.16 | 37.63 ± 2.62 | 41.52 ± 2.78 | 45.94 ± 2.94 | Python (PyTorch) |
+| reg_diabetes_s | 19.88 ± 0.68 | 14.39 ± 0.47 | 15.79 ± 1.13 | 15.88 ± 0.69 | Python (PyO3) |
+| reg_synth_m | 27.59 ± 1.70 | 55.10 ± 4.73 | 54.35 ± 3.92 | 71.69 ± 0.77 | Python (PyTorch) |
+| reg_synth_w | 69.02 ± 2.38 | 289.28 ± 44.79 | 292.69 ± 25.18 | 501.32 ± 199.19 | Python (PyTorch) |
 
 Two-way ANOVA (runtime x dataset, `log10(ms)`):
 
 | factor | df | F | p | partial η² |
 |---|---:|---:|---:|---:|
-| runtime | 3 | 64.9 | 4.54e-32 | 0.403 |
-| dataset | 7 | 2203.1 | 5.9e-246 | 0.982 |
-| interaction | 21 | 139.9 | 1.29e-137 | 0.911 |
+| runtime | 3 | 519.4 | 8.05e-116 | 0.844 |
+| dataset | 7 | 5434.2 | <1e-300 | 0.992 |
+| interaction | 21 | 190.0 | 3.59e-155 | 0.933 |
 
 Tukey–Kramer post-hoc on runtime (pooled):
 
 | pair | Δ log10(ms) | q | p | significant |
 |---|---:|---:|---:|---|
-| Python (PyTorch) vs Python (PyO3) | +0.031 | 3.67 | 0.0482 | yes |
-| Python (PyTorch) vs Rust native | +0.053 | 6.28 | 7.56e-05 | yes |
-| Python (PyTorch) vs WASM (Bun) | -0.102 | 11.94 | <1e-300 | yes |
-| Python (PyO3) vs Rust native | +0.022 | 2.60 | 0.256 | no |
-| Python (PyO3) vs WASM (Bun) | -0.133 | 15.62 | <1e-300 | yes |
-| Rust native vs WASM (Bun) | -0.155 | 18.22 | <1e-300 | yes |
+| Python (PyTorch) vs Python (PyO3) | -0.184 | 33.31 | <1e-300 | yes |
+| Python (PyTorch) vs Rust native | -0.211 | 38.18 | <1e-300 | yes |
+| Python (PyTorch) vs WASM (Bun) | -0.300 | 54.26 | <1e-300 | yes |
+| Python (PyO3) vs Rust native | -0.027 | 4.87 | 0.00362 | yes |
+| Python (PyO3) vs WASM (Bun) | -0.116 | 20.95 | <1e-300 | yes |
+| Rust native vs WASM (Bun) | -0.089 | 16.07 | <1e-300 | yes |
 
 ### Speed — Cached (fit once, predict test only)
 
 | dataset | Python (PyTorch) (ms) | Python (PyO3) (ms) | Rust native (ms) | WASM (Bun) (ms) | fastest |
 |---|---:|---:|---:|---:|---:|
-| clf_breast_l | 49.58 ± 3.05 | 28.95 ± 0.70 | 38.27 ± 3.12 | 40.14 ± 5.72 | Python (PyO3) |
-| clf_digits_w | 42.29 ± 5.52 | 34.31 ± 1.52 | 38.94 ± 2.01 | 48.21 ± 1.05 | Python (PyO3) |
-| clf_iris_nan | 34.16 ± 3.92 | 1.53 ± 0.17 | 1.34 ± 0.07 | 3.84 ± 0.82 | Rust native |
-| clf_iris_s | 35.57 ± 1.76 | 1.11 ± 0.02 | 1.22 ± 0.05 | 4.11 ± 0.72 | Python (PyO3) |
-| clf_wine_m | 29.55 ± 2.25 | 10.11 ± 0.60 | 8.99 ± 0.42 | 10.61 ± 2.25 | Rust native |
-| reg_diabetes_s | 17.13 ± 3.19 | 1.68 ± 0.19 | 1.88 ± 0.06 | 4.77 ± 0.71 | Python (PyO3) |
-| reg_synth_m | 24.16 ± 4.07 | 13.31 ± 0.68 | 16.56 ± 0.65 | 13.82 ± 0.55 | Python (PyO3) |
-| reg_synth_w | 26.88 ± 1.61 | 34.86 ± 1.19 | 40.31 ± 1.41 | 47.31 ± 1.88 | Python (PyTorch) |
+| clf_breast_l | 18.49 ± 1.54 | 24.10 ± 0.79 | 25.78 ± 1.02 | 31.72 ± 0.37 | Python (PyTorch) |
+| clf_digits_w | 20.85 ± 0.81 | 33.97 ± 1.04 | 35.13 ± 1.67 | 43.29 ± 0.76 | Python (PyTorch) |
+| clf_iris_nan | 8.85 ± 1.21 | 1.46 ± 0.08 | 1.48 ± 0.04 | 2.64 ± 0.41 | Python (PyO3) |
+| clf_iris_s | 7.60 ± 0.39 | 1.37 ± 0.08 | 1.35 ± 0.06 | 2.50 ± 0.76 | Rust native |
+| clf_wine_m | 10.68 ± 0.90 | 7.38 ± 0.20 | 8.96 ± 0.37 | 8.36 ± 0.25 | Python (PyO3) |
+| reg_diabetes_s | 8.55 ± 0.56 | 1.86 ± 0.05 | 1.96 ± 0.04 | 3.73 ± 0.47 | Python (PyO3) |
+| reg_synth_m | 12.47 ± 0.62 | 10.55 ± 0.24 | 10.51 ± 0.36 | 11.05 ± 0.25 | Rust native |
+| reg_synth_w | 16.40 ± 0.60 | 34.68 ± 0.80 | 38.00 ± 1.34 | 45.26 ± 3.90 | Python (PyTorch) |
 
 Two-way ANOVA (runtime x dataset, `log10(ms)`):
 
 | factor | df | F | p | partial η² |
 |---|---:|---:|---:|---:|
-| runtime | 3 | 3289.0 | 2.07e-222 | 0.972 |
-| dataset | 7 | 4703.8 | 9.11e-293 | 0.991 |
-| interaction | 21 | 492.5 | 6.42e-212 | 0.973 |
+| runtime | 3 | 876.6 | 1.98e-144 | 0.901 |
+| dataset | 7 | 9099.1 | <1e-300 | 0.995 |
+| interaction | 21 | 478.1 | 4.07e-210 | 0.972 |
 
 Tukey–Kramer post-hoc on runtime (pooled):
 
 | pair | Δ log10(ms) | q | p | significant |
 |---|---:|---:|---:|---|
-| Python (PyTorch) vs Python (PyO3) | +0.598 | 125.56 | <1e-300 | yes |
-| Python (PyTorch) vs Rust native | +0.558 | 117.17 | <1e-300 | yes |
-| Python (PyTorch) vs WASM (Bun) | +0.366 | 76.83 | <1e-300 | yes |
-| Python (PyO3) vs Rust native | -0.040 | 8.38 | 5.24e-08 | yes |
-| Python (PyO3) vs WASM (Bun) | -0.232 | 48.73 | <1e-300 | yes |
-| Rust native vs WASM (Bun) | -0.192 | 40.35 | <1e-300 | yes |
+| Python (PyTorch) vs Python (PyO3) | +0.221 | 62.26 | <1e-300 | yes |
+| Python (PyTorch) vs Rust native | +0.197 | 55.51 | <1e-300 | yes |
+| Python (PyTorch) vs WASM (Bun) | +0.069 | 19.41 | <1e-300 | yes |
+| Python (PyO3) vs Rust native | -0.024 | 6.75 | 1.72e-05 | yes |
+| Python (PyO3) vs WASM (Bun) | -0.152 | 42.85 | <1e-300 | yes |
+| Rust native vs WASM (Bun) | -0.128 | 36.10 | <1e-300 | yes |
+
+### Cached vs full (mean over datasets)
+
+| runtime | full (ms) | cached (ms) | speedup |
+|---|---:|---:|---:|
+| Python (PyTorch) | 37.4 | 13.0 | 2.9× |
+| Python (PyO3) | 115.8 | 14.4 | 8.0× |
+| Rust native | 115.8 | 15.4 | 7.5× |
+| WASM (Bun) | 179.7 | 18.6 | 9.7× |
 
 ### Numerical parity vs PyTorch (max |logit diff|)
 
@@ -233,29 +336,29 @@ Peak RSS is sampled externally per subprocess. *Baseline* = interpreter + framew
 
 | dataset | mode | Python (PyTorch) base / peak / Δ MB | Python (PyO3) base / peak / Δ MB | Rust native base / peak / Δ MB | WASM (Bun) base / peak / Δ MB |
 |---|---|---:|---:|---:|---:|
-| clf_breast_l | full | 422 / 460 / 38.6 | 215 / 252 / 36.2 | 8 / 40 / 31.9 | 82 / 195 / 113.1 |
-| clf_breast_l | cached | 422 / 459 / 36.8 | 215 / 245 / 29.6 | 8 / 32 / 24.3 | 82 / 204 / 122.5 |
-| clf_digits_w | full | 422 / 471 / 49.3 | 214 / 269 / 55.3 | 10 / 57 / 47.7 | 81 / 180 / 98.8 |
-| clf_digits_w | cached | 422 / 471 / 48.9 | 214 / 261 / 47.2 | 10 / 49 / 39.5 | 81 / 239 / 157.9 |
-| clf_iris_nan | full | 422 / 434 / 11.8 | 214 / 220 / 6.2 | 7 / 12 / 4.9 | 84 / 125 / 40.7 |
-| clf_iris_nan | cached | 422 / 433 / 11.0 | 214 / 220 / 6.4 | 7 / 12 / 4.6 | 84 / 111 / 26.6 |
-| clf_iris_s | full | 422 / 433 / 10.4 | 215 / 220 / 4.8 | 9 / 12 / 3.6 | 81 / 127 / 45.7 |
-| clf_iris_s | cached | 422 / 433 / 10.5 | 215 / 219 / 4.3 | 9 / 12 / 3.0 | 81 / 104 / 22.8 |
-| clf_wine_m | full | 423 / 440 / 17.5 | 213 / 225 / 12.1 | 7 / 16 / 9.6 | 82 / 133 / 51.2 |
-| clf_wine_m | cached | 423 / 439 / 16.2 | 213 / 223 / 10.2 | 7 / 15 / 7.9 | 82 / 123 / 41.4 |
-| reg_diabetes_s | full | 423 / 437 / 14.5 | 215 / 221 / 6.3 | 8 / 13 / 5.5 | 81 / 117 / 35.8 |
-| reg_diabetes_s | cached | 423 / 436 / 13.9 | 215 / 220 / 5.1 | 8 / 12 / 4.5 | 81 / 118 / 36.6 |
-| reg_synth_m | full | 423 / 441 / 18.5 | 213 / 230 / 17.1 | 7 / 20 / 12.4 | 81 / 155 / 73.7 |
-| reg_synth_m | cached | 423 / 442 / 19.4 | 213 / 227 / 13.8 | 7 / 17 / 9.1 | 81 / 145 / 63.4 |
-| reg_synth_w | full | 422 / 473 / 50.4 | 216 / 265 / 49.2 | 10 / 54 / 44.3 | 79 / 166 / 87.3 |
-| reg_synth_w | cached | 422 / 471 / 49.3 | 216 / 254 / 38.6 | 10 / 44 / 34.2 | 79 / 246 / 167.4 |
+| clf_breast_l | full | 423 / 460 / 36.4 | 35 / 68 / 33.0 | 7 / 40 / 32.6 | 83 / 239 / 156.2 |
+| clf_breast_l | cached | 423 / 459 / 35.3 | 35 / 59 / 23.7 | 7 / 31 / 23.1 | 83 / 189 / 106.3 |
+| clf_digits_w | full | 423 / 471 / 48.2 | 35 / 87 / 51.7 | 7 / 58 / 50.8 | 74 / 185 / 110.9 |
+| clf_digits_w | cached | 423 / 471 / 48.2 | 35 / 77 / 41.8 | 7 / 49 / 42.2 | 74 / 246 / 171.5 |
+| clf_iris_nan | full | 422 / 436 / 14.6 | 35 / 41 / 5.4 | 7 / 12 / 5.6 | 72 / 130 / 58.5 |
+| clf_iris_nan | cached | 422 / 434 / 12.3 | 35 / 40 / 5.0 | 7 / 12 / 5.4 | 72 / 114 / 41.8 |
+| clf_iris_s | full | 423 / 433 / 10.2 | 35 / 40 / 5.2 | 9 / 12 / 3.2 | 77 / 119 / 41.3 |
+| clf_iris_s | cached | 423 / 433 / 10.2 | 35 / 40 / 4.6 | 9 / 12 / 3.3 | 77 / 116 / 38.6 |
+| clf_wine_m | full | 422 / 439 / 16.7 | 35 / 45 / 9.2 | 7 / 16 / 9.4 | 79 / 140 / 60.9 |
+| clf_wine_m | cached | 422 / 439 / 17.0 | 35 / 43 / 7.9 | 7 / 15 / 7.9 | 79 / 124 / 45.1 |
+| reg_diabetes_s | full | 423 / 437 / 13.6 | 36 / 42 / 5.2 | 7 / 13 / 6.3 | 77 / 131 / 54.0 |
+| reg_diabetes_s | cached | 423 / 435 / 12.1 | 36 / 41 / 4.3 | 7 / 12 / 5.4 | 77 / 117 / 40.1 |
+| reg_synth_m | full | 424 / 442 / 17.7 | 35 / 48 / 12.6 | 10 / 20 / 10.1 | 87 / 143 / 56.0 |
+| reg_synth_m | cached | 424 / 441 / 16.7 | 35 / 46 / 10.5 | 10 / 17 / 7.3 | 87 / 143 / 56.3 |
+| reg_synth_w | full | 422 / 471 / 49.0 | 37 / 83 / 45.6 | 8 / 53 / 45.8 | 87 / 220 / 133.1 |
+| reg_synth_w | cached | 422 / 470 / 48.0 | 37 / 75 / 37.7 | 8 / 44 / 37.0 | 87 / 193 / 106.1 |
 
 Randomized-block two-way ANOVA on inference delta (full forward; dataset is the block, runtime the treatment):
 
 | factor | df | F | p | partial η² |
 |---|---:|---:|---:|---:|
-| runtime | 3 | 44.6 | 2.76e-09 | 0.864 |
-| dataset | 7 | 25.9 | 5.84e-09 | 0.896 |
+| runtime | 3 | 62.8 | 1.18e-10 | 0.900 |
+| dataset | 7 | 27.9 | 2.92e-09 | 0.903 |
 
 Python→Rust FFI call overhead (no-op `ping`, 20k calls): **0.03 µs/call** — negligible against multi-millisecond inference.
 

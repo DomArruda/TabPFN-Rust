@@ -10,11 +10,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import struct
 import sys
 import time
 
 import numpy as np
-from safetensors.torch import load_file
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -23,6 +23,16 @@ if HERE not in sys.path:
 import tabpfn_rs  # noqa: E402  (built by scripts/build_pyd.ps1 / cargo build -p tabpfn-py)
 
 FIXTURES = os.path.join(HERE, "fixtures")
+
+
+def read_st_tensor_bytes(path: str, name: str) -> bytes:
+    """Read one tensor's raw bytes from safetensors without importing torch."""
+    with open(path, "rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len).decode("utf-8"))
+        start, end = header[name]["data_offsets"]
+        f.seek(8 + header_len + start)
+        return f.read(end - start)
 
 
 def decode(hexstr: str) -> np.ndarray:
@@ -42,8 +52,9 @@ def main() -> int:
         spec = json.load(f)
     d = next(x for x in spec["datasets"] if x["name"] == args.dataset)
 
-    golden = load_file(os.path.join(FIXTURES, "golden.safetensors"))
-    config_json = golden["__config_json__"].numpy().tobytes().decode()
+    config_json = read_st_tensor_bytes(
+        os.path.join(FIXTURES, "golden.safetensors"), "__config_json__"
+    ).decode()
     weights = open(os.path.join(FIXTURES, "model.safetensors"), "rb").read()
 
     x_train = decode(d["x_train"])

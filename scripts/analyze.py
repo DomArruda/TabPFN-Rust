@@ -403,6 +403,15 @@ def render_markdown(rep: dict) -> str:
             )
         out.append("")
 
+    out.append("### Cached vs full (mean over datasets)\n")
+    out.append("| runtime | full (ms) | cached (ms) | speedup |")
+    out.append("|---|---:|---:|---:|")
+    for r in RUNTIMES:
+        f = sum(rep["speed"]["full"]["per_dataset"][d]["means_ms"][r]["mean"] for d in ds) / len(ds)
+        c = sum(rep["speed"]["cached"]["per_dataset"][d]["means_ms"][r]["mean"] for d in ds) / len(ds)
+        out.append(f"| {LABEL[r]} | {f:.1f} | {c:.1f} | {f / c:.1f}× |")
+    out.append("")
+
     out.append("### Numerical parity vs PyTorch (max |logit diff|)\n")
     out.append("| dataset | mode | " + " | ".join(LABEL[r] for r in RUNTIMES[1:]) + " |")
     out.append("|---|---|" + "---:|" * (len(RUNTIMES) - 1))
