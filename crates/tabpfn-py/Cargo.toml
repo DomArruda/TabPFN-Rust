@@ -1,0 +1,15 @@
+[package]
+name = "tabpfn-py"
+version = "0.1.0"
+edition.workspace = true
+license = "Apache-2.0"
+
+[lib]
+name = "tabpfn_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+tabpfn-core = { path = "../tabpfn-core" }
+candle-core.workspace = true
+serde_json.workspace = true
+pyo3 = { version = "0.30", features = ["extension-module"] }

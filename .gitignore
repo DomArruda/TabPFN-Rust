@@ -1,0 +1,29 @@
+# ---- Rust build output (debug AND release) ----
+/target/
+
+# ---- wasm-bindgen generated glue (rebuild: npm run build:wasm) ----
+/pkg/
+
+# ---- Python build artefacts ----
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.dll
+.venv/
+venv/
+*.egg-info/
+
+# ---- Node ----
+/node_modules/
+/dist/
+
+# ---- Benchmark scratch (raw.json / stats.json are committed) ----
+scripts/results/tmp/
+scripts/results/per_run/
+scripts/fixtures/stages.safetensors
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+*.log

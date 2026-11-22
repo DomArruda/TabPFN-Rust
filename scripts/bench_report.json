@@ -1,0 +1,168 @@
+{
+  "fixture": "scripts/fixtures/model.safetensors + golden.safetensors",
+  "notes": "Rust times full forward on train+test; WASM times cached predict (fit once, predict-only); Python times full forward. Max-abs parity is computed on logits_cached / logits_full which round-trip to the same golden values.",
+  "tasks": {
+    "multiclass": {
+      "numerics": {
+        "python_vs_rust": 1.1920928955078125e-07,
+        "python_vs_wasm": 1.1920928955078125e-07,
+        "rust_vs_wasm": 1.1920928955078125e-07,
+        "py_golden": 0.0,
+        "rust_golden": 1.1920928955078125e-07,
+        "wasm_golden": 1.1920928955078125e-07,
+        "parity_bar_1e4": 0.0001,
+        "within_ratio": true,
+        "note": "WASM times the Cached (fit-once) path so it excludes the _stages_0_to_2 + ICL block rebuild that Python and Rust pay per full forward; Rust native and WASM share the same candle-core binary so their gap isolates WASM overhead."
+      },
+      "timings": {
+        "python": {
+          "n": 10,
+          "mean_ms": 17.88628999784123,
+          "median_ms": 17.40504999179393,
+          "sd_ms": 2.9351860540471417,
+          "min_ms": 13.980099989566952,
+          "max_ms": 22.833800001535565,
+          "ci95_ms": [
+            16.067042833559626,
+            19.705537162122837
+          ]
+        },
+        "rust": {
+          "n": 10,
+          "mean_ms": 3.34522,
+          "median_ms": 3.33535,
+          "sd_ms": 0.18462323677033604,
+          "min_ms": 3.0896,
+          "max_ms": 3.7675,
+          "ci95_ms": [
+            3.2307893323113848,
+            3.459650667688615
+          ]
+        },
+        "wasm": {
+          "n": 10,
+          "mean_ms": 1.8589999999999975,
+          "median_ms": 1.8013499999999851,
+          "sd_ms": 0.3402972622086152,
+          "min_ms": 1.5405999999999835,
+          "max_ms": 2.5918000000000347,
+          "ci95_ms": [
+            1.6480815717006396,
+            2.0699184282993555
+          ]
+        }
+      },
+      "speedups": {
+        "rust_over_python_mean": 0.18702704699542208,
+        "wasm_over_python_mean": 0.10393435420226149,
+        "wasm_over_rust_mean": 0.555718308511846,
+        "rust_over_python_median": 0.19163116460869337,
+        "wasm_over_python_median": 0.1034958245365155
+      },
+      "hypothesis_tests": {
+        "python_vs_rust": {
+          "t_stat": 15.635194960947896,
+          "p_value_two_sided": 7.202537729235894e-08,
+          "cohens_d": 6.992271754828332,
+          "significant_at_0p05": true,
+          "significant_at_0p01": true
+        },
+        "python_vs_wasm": {
+          "t_stat": 17.152409299604884,
+          "p_value_two_sided": 2.5468067550642227e-08,
+          "cohens_d": 7.6707906343632155,
+          "significant_at_0p05": true,
+          "significant_at_0p01": true
+        },
+        "rust_vs_wasm": {
+          "t_stat": 12.139469767403888,
+          "p_value_two_sided": 8.904297351912468e-09,
+          "cohens_d": 5.428935922143731,
+          "significant_at_0p05": true,
+          "significant_at_0p01": true
+        }
+      }
+    },
+    "regression": {
+      "numerics": {
+        "python_vs_rust": 2.384185791015625e-07,
+        "python_vs_wasm": 3.5762786865234375e-07,
+        "rust_vs_wasm": 3.5762786865234375e-07,
+        "py_golden": 0.0,
+        "rust_golden": 2.384185791015625e-07,
+        "wasm_golden": 3.5762786865234375e-07,
+        "parity_bar_1e4": 0.0001,
+        "within_ratio": true,
+        "note": "WASM times the Cached (fit-once) path so it excludes the _stages_0_to_2 + ICL block rebuild that Python and Rust pay per full forward; Rust native and WASM share the same candle-core binary so their gap isolates WASM overhead."
+      },
+      "timings": {
+        "python": {
+          "n": 10,
+          "mean_ms": 21.24199000245426,
+          "median_ms": 21.609750008792616,
+          "sd_ms": 3.8909626317611776,
+          "min_ms": 16.025600023567677,
+          "max_ms": 25.648599985288456,
+          "ci95_ms": [
+            18.830346377888464,
+            23.653633627020053
+          ]
+        },
+        "rust": {
+          "n": 10,
+          "mean_ms": 3.76545,
+          "median_ms": 3.7302999999999997,
+          "sd_ms": 0.28454122626509576,
+          "min_ms": 3.2824,
+          "max_ms": 4.1661,
+          "ci95_ms": [
+            3.5890895208098543,
+            3.9418104791901456
+          ]
+        },
+        "wasm": {
+          "n": 10,
+          "mean_ms": 1.4014400000000138,
+          "median_ms": 1.298650000000066,
+          "sd_ms": 0.246168497849224,
+          "min_ms": 1.2501999999999498,
+          "max_ms": 2.0591000000000577,
+          "ci95_ms": [
+            1.2488631842883953,
+            1.5540168157116323
+          ]
+        }
+      },
+      "speedups": {
+        "rust_over_python_mean": 0.1772644653144525,
+        "wasm_over_python_mean": 0.06597498632840398,
+        "wasm_over_rust_mean": 0.37218393551899875,
+        "rust_over_python_median": 0.17262115473257247,
+        "wasm_over_python_median": 0.0600955586932597
+      },
+      "hypothesis_tests": {
+        "python_vs_rust": {
+          "t_stat": 14.165771316302,
+          "p_value_two_sided": 1.6593979281148737e-07,
+          "cohens_d": 6.335125523393589,
+          "significant_at_0p05": true,
+          "significant_at_0p01": true
+        },
+        "python_vs_wasm": {
+          "t_stat": 16.092710967906505,
+          "p_value_two_sided": 5.584747286950029e-08,
+          "cohens_d": 7.1968791332990785,
+          "significant_at_0p05": true,
+          "significant_at_0p01": true
+        },
+        "rust_vs_wasm": {
+          "t_stat": 19.868953098638556,
+          "p_value_two_sided": 1.623047214396269e-13,
+          "cohens_d": 8.88566595406218,
+          "significant_at_0p05": true,
+          "significant_at_0p01": true
+        }
+      }
+    }
+  }
+}
